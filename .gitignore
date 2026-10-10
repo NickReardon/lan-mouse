@@ -1,4 +1,5 @@
 /target
+/.worktrees/
 .gdbinit
 .idea/
 .vs/
