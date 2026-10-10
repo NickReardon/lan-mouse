@@ -75,19 +75,18 @@ On Windows, extract the entire ZIP and run `lan-mouse.exe` from the extracted
 folder so it can find the included DLLs. On macOS, extract `Lan Mouse.app` and
 follow the macOS launch and Accessibility permission instructions below.
 
-The **Release** workflow builds packages for pull requests and pushes to `main`.
-Pull request builds upload artifacts without publishing a release. To download
-one, sign in to GitHub, open the relevant run under
-[Actions](https://github.com/NickReardon/lan-mouse/actions/workflows/release.yml),
-and select the Windows or macOS package under **Artifacts**. Extract the artifact
-download first, then extract the app ZIP inside it. Each platform uploads its
-artifact independently, so successful packages remain available even if another
-platform fails.
+All GitHub build workflows run only when a version tag matching `v*` is pushed
+(for example, `v0.11.1`). Ordinary branch pushes, pull requests, and manual
+dispatches do not start GitHub builds. Build and test locally during development
+using the instructions below; keeping work local also means leaving it unpushed.
 
-Pushes to `main` publish development prereleases; version tags publish releases.
-Maintainers can also select **Release → Run workflow** in Actions to build a
-selected branch manually. On a newly created fork, enable workflows in the
-**Actions** tab first if GitHub prompts you to do so.
+When ready to publish, tag the intended release commit and push that tag. The
+**Release** workflow builds the apps and publishes the downloads for that tag.
+Each platform also uploads its package independently to the run under
+[Actions](https://github.com/NickReardon/lan-mouse/actions/workflows/release.yml),
+so successful packages remain available even if another platform fails. Artifact
+downloads require signing in to GitHub; extract the artifact download first,
+then extract the app ZIP inside it.
 
 <details>
     <summary>Arch Linux</summary>

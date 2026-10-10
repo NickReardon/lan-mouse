@@ -2,10 +2,8 @@ name: Nix Binary Cache
 
 on:
   push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
-  workflow_dispatch:
+    tags:
+      - 'v*'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
