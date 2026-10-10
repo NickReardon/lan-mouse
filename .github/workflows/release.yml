@@ -6,12 +6,17 @@ on:
     branches: [ "main" ]
     tags:
       - v**
+  pull_request:
+    branches: [ "main" ]
   workflow_dispatch:
     inputs:
       name:
         description: 'Development release name'
         required: false
         default: ''
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -185,6 +190,9 @@ jobs:
 
   release:
     name: "Release"
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: write
     needs: [windows-release-build, linux-release-build, linux-arm64-release-build, macos-release-build, macos-arm64-release-build]
     runs-on: "ubuntu-latest"
     steps:

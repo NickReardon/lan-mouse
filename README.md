@@ -62,6 +62,33 @@ It can be used as a remote control for any device supported by Lan Mouse.
 
 ## Installation
 
+### Downloading builds of this fork
+
+You do not need Rust or GTK development tools to run a packaged build.
+Download builds of this fork from
+[NickReardon/lan-mouse releases](https://github.com/NickReardon/lan-mouse/releases).
+Choose `lan-mouse-windows-x86_64.zip` for Windows,
+`lan-mouse-macos-arm64.zip` for Apple silicon, or
+`lan-mouse-macos-intel.zip` for Intel Macs.
+
+On Windows, extract the entire ZIP and run `lan-mouse.exe` from the extracted
+folder so it can find the included DLLs. On macOS, extract `Lan Mouse.app` and
+follow the macOS launch and Accessibility permission instructions below.
+
+The **Release** workflow builds packages for pull requests and pushes to `main`.
+Pull request builds upload artifacts without publishing a release. To download
+one, sign in to GitHub, open the relevant run under
+[Actions](https://github.com/NickReardon/lan-mouse/actions/workflows/release.yml),
+and select the Windows or macOS package under **Artifacts**. Extract the artifact
+download first, then extract the app ZIP inside it. Each platform uploads its
+artifact independently, so successful packages remain available even if another
+platform fails.
+
+Pushes to `main` publish development prereleases; version tags publish releases.
+Maintainers can also select **Release → Run workflow** in Actions to build a
+selected branch manually. On a newly created fork, enable workflows in the
+**Actions** tab first if GitHub prompts you to do so.
+
 <details>
     <summary>Arch Linux</summary>
 
