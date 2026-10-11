@@ -93,10 +93,15 @@ then extract the app ZIP inside it.
 Build an existing branch checkout without switching the current checkout:
 
 ```powershell
-./scripts/branch-build.ps1 build codex/edge-position
+.\scripts\branch-build.cmd build codex/edge-position
 # Create a missing checkout under the base repository's .worktrees/:
-./scripts/branch-build.ps1 build codex/edge-position -CreateWorktree
+.\scripts\branch-build.cmd build codex/edge-position -CreateWorktree
 ```
+
+The Windows `.cmd` launcher works from Command Prompt and PowerShell. It runs
+the PowerShell helper with an execution-policy bypass limited to that child
+process; it does not change your saved user or machine execution policy.
+The `.ps1` entry point remains available when your policy permits scripts.
 
 ```sh
 bash scripts/branch-build.sh build codex/edge-position
@@ -132,8 +137,8 @@ The target branch must include the manual Release workflow trigger.
 
 ```powershell
 # Windows: request a build, then download and launch after it completes.
-./scripts/branch-build.ps1 -Branch codex/edge-position -Build
-./scripts/branch-build.ps1 -Branch codex/edge-position -Launch
+.\scripts\branch-build.cmd -Branch codex/edge-position -Build
+.\scripts\branch-build.cmd -Branch codex/edge-position -Launch
 ```
 
 ```sh
