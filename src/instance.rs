@@ -52,14 +52,27 @@ fn refresh(system: &mut System) {
         ProcessRefreshKind::nothing()
             .with_exe(UpdateKind::Always)
             .with_cmd(UpdateKind::Always)
+            .with_cwd(UpdateKind::Always)
             .with_user(UpdateKind::Always),
     );
+}
+
+/// macOS reports the path a process was started with, which may be relative
+/// to its working directory (e.g. `target/debug/lan-mouse` under `cargo run`).
+/// Resolve it so one binary compares equal however it was launched.
+fn executable(process: &Process) -> Option<PathBuf> {
+    let exe = process.exe()?;
+    if exe.is_absolute() {
+        Some(exe.to_owned())
+    } else {
+        Some(process.cwd()?.join(exe))
+    }
 }
 
 fn matches_identity(instance: &Instance, process: &Process) -> bool {
     process.pid() == instance.pid
         && process.start_time() == instance.started
-        && process.exe() == Some(instance.executable.as_path())
+        && executable(process).as_deref() == Some(instance.executable.as_path())
         && process.user_id() == Some(&instance.user)
 }
 
@@ -128,7 +141,7 @@ fn instances(system: &System, current: Pid) -> Result<Vec<Instance>, StartupErro
         if process.pid() == current || process.user_id() != Some(user) {
             continue;
         }
-        let Some(executable) = process.exe() else {
+        let Some(executable) = executable(process) else {
             continue;
         };
         if executable.file_stem().and_then(|s| s.to_str()) != Some("lan-mouse")
@@ -137,15 +150,15 @@ fn instances(system: &System, current: Pid) -> Result<Vec<Instance>, StartupErro
             continue;
         }
         if !*binaries
-            .entry(executable.to_owned())
-            .or_insert_with(|| is_lan_mouse_binary(executable))
+            .entry(executable.clone())
+            .or_insert_with(|| is_lan_mouse_binary(&executable))
         {
             continue;
         }
         result.push(Instance {
             pid: process.pid(),
             started: process.start_time(),
-            executable: executable.to_owned(),
+            executable,
             user: user.clone(),
             daemon: process.cmd().iter().any(|arg| arg == "daemon"),
         });
@@ -208,17 +221,18 @@ fn is_internal_child(system: &System, current: Pid) -> bool {
         }
         return false;
     };
+    let (own_exe, parent_exe) = (executable(process), executable(parent));
     let verified = expected.as_deref() == Some(&parent.pid().to_string())
-        && parent.exe().is_some()
-        && parent.exe() == process.exe()
+        && parent_exe.is_some()
+        && parent_exe == own_exe
         && parent.user_id().is_some()
         && parent.user_id() == process.user_id();
     if expected.is_some() && !verified {
         log::warn!(
             "internal daemon check failed: expected parent {expected:?}, actual {}; exe {:?} vs parent {:?}; user {:?} vs parent {:?}",
             parent.pid(),
-            process.exe(),
-            parent.exe(),
+            own_exe,
+            parent_exe,
             process.user_id(),
             parent.user_id()
         );
@@ -490,7 +504,7 @@ mod tests {
         let mut instance = Instance {
             pid: process.pid(),
             started: process.start_time(),
-            executable: process.exe().unwrap().to_owned(),
+            executable: executable(process).unwrap(),
             user: process.user_id().unwrap().clone(),
             daemon: false,
         };
