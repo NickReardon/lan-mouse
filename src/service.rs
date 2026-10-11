@@ -67,6 +67,7 @@ pub struct Service {
     /// map from capture handle to connection info
     incoming_conn_info: HashMap<ClientHandle, Incoming>,
     next_trigger_handle: u64,
+    shutdown_requested: bool,
 }
 
 #[derive(Debug)]
@@ -123,6 +124,7 @@ impl Service {
             incoming_conn_info: Default::default(),
             incoming_conns: Default::default(),
             next_trigger_handle: 0,
+            shutdown_requested: false,
         };
         Ok(service)
     }
@@ -150,9 +152,19 @@ impl Service {
                 _ = self.config.changed() => self.handle_config_change(),
                 r = signal::ctrl_c() => break r.expect("failed to wait for CTRL+C"),
             }
+            if self.shutdown_requested {
+                break;
+            }
         }
 
         log::info!("terminating service ...");
+        // Notify first so frontends do not treat EOF as a reason to restart.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            self.frontend_listener
+                .broadcast(FrontendEvent::ShuttingDown),
+        )
+        .await;
         log::debug!("terminating capture ...");
         self.capture.terminate().await;
         log::debug!("terminating emulation ...");
@@ -169,6 +181,18 @@ impl Service {
             Err(e) => return log::error!("error receiving request: {e}"),
         };
         match request {
+            FrontendRequest::Identify => {
+                self.pending_frontend_events
+                    .push_back(FrontendEvent::InstanceInfo {
+                        pid: std::process::id(),
+                    });
+                self.frontend_event_pending.notify_one();
+            }
+            FrontendRequest::Shutdown { pid } => {
+                if pid == std::process::id() {
+                    self.shutdown_requested = true;
+                }
+            }
             FrontendRequest::Activate(handle, active) => {
                 self.set_client_active(handle, active);
                 self.save_config();

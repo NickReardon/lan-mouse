@@ -451,6 +451,36 @@ for information on how to use a specific command.
 
 Lan Mouse can be launched in daemon mode to keep it running in the background (e.g. for use in a systemd-service).
 
+When launching another copy on Windows, macOS, or Linux, Lan Mouse checks for
+existing apps and daemons owned by your user. Choose **Close existing and start
+this version** to replace them with the executable you just launched, including
+its command-line configuration. Input sharing stops briefly during replacement.
+**Cancel** exits the new launch and leaves the existing session running.
+
+New builds shut down cooperatively and release held input. Older builds may need
+a second **Force close and start** confirmation, especially on Windows. Force
+closing can skip input cleanup. Lan Mouse verifies executable markers, process
+owner, path, PID, and start time before targeting a process; it never closes a
+process based only on its name or an occupied port. Processes that cannot be
+verified or accessed cause an error instead of being terminated. Keep the normal
+`lan-mouse` executable name so installed and test builds can be identified.
+
+Interactive `lan-mouse daemon` launches offer terminal confirmation. Unattended
+daemon launches report a conflict and exit with an error instead of waiting for
+input or replacing a running instance. `lan-mouse cli` continues controlling the
+running daemon, and capture/emulation test subcommands do not replace it.
+Concurrent launches are serialized during startup; retry if another launch is
+already in progress. On Linux the startup lock follows the per-user IPC runtime
+directory. If systemd or another supervisor restarts a daemon during replacement,
+Lan Mouse reports the conflict; stop or pause that service before retrying. It
+does not modify service-manager configuration or request elevated privileges.
+
+This check runs when an executable is actually launched. OS actions that only
+reactivate an existing application (for example, macOS Launch Services reopening
+an already running app) retain that OS behavior; launch the desired test build's
+executable to request replacement. Local IPC lifecycle support requires matching
+0.4 frontends/daemons; older builds use the process-based replacement fallback.
+
 To do so, use the `daemon` subcommand:
 
 ```sh
