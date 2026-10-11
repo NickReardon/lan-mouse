@@ -75,10 +75,58 @@ On Windows, extract the entire ZIP and run `lan-mouse.exe` from the extracted
 folder so it can find the included DLLs. On macOS, extract `Lan Mouse.app` and
 follow the macOS launch and Accessibility permission instructions below.
 
-All GitHub build workflows run only when a version tag matching `v*` is pushed
-(for example, `v0.11.1`). Ordinary branch pushes, pull requests, and manual
-dispatches do not start GitHub builds. Build and test locally during development
-using the instructions below; keeping work local also means leaving it unpushed.
+The **Rust** workflow runs formatting, build, check, lint, and test jobs for pull
+requests, pushes to `main`, and version tags matching `v*` (for example,
+`v0.11.1`). Checks cover Linux, Windows, and macOS. Ordinary pushes to feature
+branches run checks once there is an open pull request.
+
+For downloadable test builds, open the
+[Release workflow](https://github.com/NickReardon/lan-mouse/actions/workflows/release.yml),
+choose **Run workflow**, select your pushed branch, and run it. Manual runs build
+packages for all supported release platforms without publishing a release.
+Download the appropriate package from the run's **Artifacts** section within one
+day. The workflow must be present on the default branch for **Run workflow** to
+appear. Record the run's commit when reporting manual test results; if the branch
+changes, test a new build before merging.
+
+You can also use the branch-build scripts from a terminal with
+[GitHub CLI](https://cli.github.com) installed and authenticated (`gh auth login`).
+Run these commands from the repository root, replacing `feature/MyChange` with
+your pushed branch. Request the build once, then download on each test machine
+after the workflow finishes:
+
+```powershell
+# Windows: request a build, then download and launch it
+./scripts/branch-build.ps1 -Branch feature/MyChange -Build
+./scripts/branch-build.ps1 -Branch feature/MyChange -Launch
+```
+
+```sh
+# macOS / Linux: request a build, then download and launch it
+bash scripts/branch-build.sh feature/MyChange --build
+bash scripts/branch-build.sh feature/MyChange --launch
+```
+
+Omit `-Launch` / `--launch` to only download and extract. The scripts automatically
+select the platform package and print its run ID and commit. Branch selection
+checks the remote branch's latest commit. `-Build` / `--build` reuses a successful
+build with an unexpired platform package, or an already queued/running build
+for that commit. It requests a new build when neither is available, including
+when previous builds failed or their packages expired. Download mode refuses
+older commits and asks you to build or wait if the current commit is unavailable.
+Only pushed commits are considered. A branch can move after this check, and
+simultaneous requests from different machines can still race to start a build.
+To test the same build across machines, use `-RunId 123456789` on Windows
+or `--run-id 123456789` on macOS/Linux instead of specifying a branch.
+Each download gets a new folder under `~/Downloads`; use `-Destination` / `--dest`
+to choose another parent folder. Quit the existing Lan Mouse before launching.
+The scripts can be copied to test machines without installing Rust or cloning
+the repository. Linux packages require the runtime libraries listed below;
+macOS still requires the usual launch and Accessibility permissions.
+
+Workflows use standard GitHub-hosted runners. Keep your account's Actions budget
+at $0 with **Stop usage** enabled to block paid usage. Test artifacts expire after
+one day to limit storage; this repository cannot enforce account billing settings.
 
 When ready to publish, tag the intended release commit and push that tag. The
 **Release** workflow builds the apps and publishes the downloads for that tag.
@@ -221,23 +269,7 @@ For a detailed list of available features, checkout the [Cargo.toml](./Cargo.tom
 
 ## Development
 
-### Git pre-commit hook
-
-This repository includes a local git hooks directory `.githooks/` with a `pre-commit` script that enforces formatting, lints, and tests before allowing a commit.  It is optional to enable it, but it will prevent you from committing code with failing unit tests or that needs clippy/fmt fixes. To enable the hook locally:
-
-1. Make the hook executable:
-
-```sh
-chmod +x .githooks/pre-commit
-```
-
-2. Point git to the hooks directory (one-time per clone):
-
-```sh
-git config core.hooksPath .githooks
-```
-
-The `pre-commit` script runs `cargo fmt --all` (and fails if files were modified), `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and `cargo test --workspace --all-features`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contributor guidelines, branch naming, validation commands, and the optional Git pre-commit hook.
 
 ### Dependencies & Compiling from Source
 <details>
