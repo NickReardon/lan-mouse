@@ -286,9 +286,19 @@ pub fn request_shutdown(pid: u32) {
     };
     runtime.block_on(async {
         let shutdown = async {
-            let (_, mut writer) =
+            let (mut events, mut writer) =
                 lan_mouse_ipc::connect_async(Some(Duration::from_millis(300))).await?;
-            writer.request(FrontendRequest::Shutdown { pid }).await
+            writer.request(FrontendRequest::Shutdown { pid }).await?;
+            // Stay connected until the daemon confirms. On Windows, closing the
+            // TCP connection right after writing (with broadcasts still unread)
+            // can reset it before the daemon reads the request.
+            use futures::StreamExt;
+            while let Some(event) = events.next().await {
+                if matches!(event?, FrontendEvent::ShuttingDown) {
+                    break;
+                }
+            }
+            Ok::<(), lan_mouse_ipc::IpcError>(())
         };
         match tokio::time::timeout(Duration::from_secs(1), shutdown).await {
             Ok(Ok(())) => {}
@@ -338,7 +348,9 @@ fn signal(system: &mut System, instance: &Instance, force: bool) -> Result<(), S
             .kill_with(sysinfo::Signal::Interrupt)
             .unwrap_or(false)
     };
-    if force && !sent {
+    // Windows refuses to terminate a process that is already exiting, as the
+    // app does once its daemon is closed. Only fail if it is still running.
+    if force && !sent && !wait_for_exit(system, std::slice::from_ref(instance)).is_empty() {
         return Err(StartupError::Conflict(format!(
             "Could not close PID {}. Check process permissions.",
             instance.pid
