@@ -1,5 +1,8 @@
 # General Software Architecture
 
+For the first-iteration feature scope, Windows–macOS acceptance criteria, and
+deferred Linux validation, see [First iteration](ITERATION-1.md).
+
 ## Events
 
 Each instance of lan-mouse can emit and receive events, where
@@ -74,4 +77,3 @@ This ensures that
 - a) Events can never result in a feedback loop.
 - b) As soon as a virtual input enters another client, lan-mouse will stop receiving events,
 which ensures clients can only be controlled directly and not indirectly through other clients.
-
