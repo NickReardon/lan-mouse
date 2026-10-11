@@ -97,3 +97,15 @@ pub(crate) fn clamp_to_display_bounds(
     let (min_y, max_y) = (display.top, display.bottom - 1);
     (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
 }
+
+pub(crate) fn rects(displays: &[RECT]) -> Vec<input_event::edge::Rect> {
+    displays
+        .iter()
+        .map(|d| input_event::edge::Rect {
+            left: f64::from(d.left),
+            top: f64::from(d.top),
+            right: f64::from(d.right),
+            bottom: f64::from(d.bottom),
+        })
+        .collect()
+}

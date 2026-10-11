@@ -38,6 +38,8 @@ pub(crate) enum EmulationEvent {
         addr: SocketAddr,
         /// position of the connection
         pos: lan_mouse_ipc::Position,
+        /// Normalized entry coordinate, once per capture session.
+        fraction: Option<u16>,
         /// certificate fingerprint of the connection
         fingerprint: String,
     },
@@ -68,7 +70,8 @@ pub(crate) enum EmulationEvent {
 
 enum EmulationRequest {
     Reenable,
-    Release(SocketAddr),
+    EntryReady(SocketAddr),
+    Release(SocketAddr, Option<u16>),
     ChangePort(u16),
     Terminate,
 }
@@ -95,9 +98,15 @@ impl Emulation {
         }
     }
 
-    pub(crate) fn send_leave_event(&self, addr: SocketAddr) {
+    pub(crate) fn entry_ready(&self, addr: SocketAddr) {
         self.request_tx
-            .send(EmulationRequest::Release(addr))
+            .send(EmulationRequest::EntryReady(addr))
+            .expect("channel closed");
+    }
+
+    pub(crate) fn send_leave_event(&self, addr: SocketAddr, fraction: Option<u16>) {
+        self.request_tx
+            .send(EmulationRequest::Release(addr, fraction))
             .expect("channel closed");
     }
 
@@ -141,6 +150,8 @@ impl ListenTask {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         let mut last_response = HashMap::new();
         let mut rejected_connections = HashMap::new();
+        // false while cursor placement is pending, true once ready.
+        let mut entered = HashMap::new();
         loop {
             select! {
                 e = self.listener.next() => {match e {
@@ -148,15 +159,21 @@ impl ListenTask {
                         log::trace!("{event} <-<-<-<-<- {addr}");
                         last_response.insert(addr, Instant::now());
                         match event {
-                            ProtoEvent::Enter(pos) => {
+                            ProtoEvent::Enter(pos, fraction) => {
                                 if let Some(fingerprint) = self.listener.get_certificate_fingerprint(addr).await {
+                                    if let Some(ready) = entered.get(&addr) {
+                                        if *ready { self.listener.reply(addr, ProtoEvent::Ack(0)).await; }
+                                        continue;
+                                    }
+                                    entered.insert(addr, fraction.is_none());
                                     log::info!("releasing capture: {addr} entered this device");
                                     self.event_tx.send(EmulationEvent::ReleaseNotify).expect("channel closed");
-                                    self.listener.reply(addr, ProtoEvent::Ack(0)).await;
-                                    self.event_tx.send(EmulationEvent::Entered{addr, pos: to_ipc_pos(pos), fingerprint}).expect("channel closed");
+                                    if fraction.is_none() { self.listener.reply(addr, ProtoEvent::Ack(0)).await; }
+                                    self.event_tx.send(EmulationEvent::Entered{addr, pos: to_ipc_pos(pos), fraction, fingerprint}).expect("channel closed");
                                 }
                             }
-                            ProtoEvent::Leave(_) => {
+                            ProtoEvent::Leave(..) => {
+                                entered.remove(&addr);
                                 self.emulation_proxy.remove(addr);
                                 self.listener.reply(addr, ProtoEvent::Ack(0)).await;
                             }
@@ -197,8 +214,18 @@ impl ListenTask {
                 request = self.request_rx.recv() => match request.expect("channel closed") {
                     // reenable emulation
                     EmulationRequest::Reenable => self.emulation_proxy.reenable(),
+                    EmulationRequest::EntryReady(addr) => {
+                        if let Some(ready) = entered.get_mut(&addr) {
+                            *ready = true;
+                            self.listener.reply(addr, ProtoEvent::Ack(0)).await;
+                        }
+                    },
                     // notify the other end that we hit a barrier (should release capture)
-                    EmulationRequest::Release(addr) => self.listener.reply(addr, ProtoEvent::Leave(0)).await,
+                    EmulationRequest::Release(addr, fraction) => {
+                        entered.remove(&addr);
+                        self.emulation_proxy.remove(addr);
+                        self.listener.reply(addr, ProtoEvent::Leave(0, fraction)).await;
+                    },
                     EmulationRequest::ChangePort(port) => {
                         self.listener.request_port_change(port);
                         let result = self.listener.port_changed().await;
@@ -210,6 +237,7 @@ impl ListenTask {
                     last_response.retain(|&addr,instant| {
                         if instant.elapsed() > Duration::from_secs(1) {
                             log::warn!("releasing keys: {addr} not responding!");
+                            entered.remove(&addr);
                             self.emulation_proxy.remove(addr);
                             self.event_tx.send(EmulationEvent::Disconnected { addr }).expect("channel closed");
                             false
