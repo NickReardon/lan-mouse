@@ -75,10 +75,10 @@ On Windows, extract the entire ZIP and run `lan-mouse.exe` from the extracted
 folder so it can find the included DLLs. On macOS, extract `Lan Mouse.app` and
 follow the macOS launch and Accessibility permission instructions below.
 
-All GitHub build workflows run only when a version tag matching `v*` is pushed
-(for example, `v0.11.1`). Ordinary branch pushes, pull requests, and manual
-dispatches do not start GitHub builds. Build and test locally during development
-using the instructions below; keeping work local also means leaving it unpushed.
+Version tags matching `v*` (for example, `v0.11.1`) run the GitHub build
+workflows. Ordinary branch pushes and pull requests do not start builds.
+The Release workflow also accepts manual requests for branch test packages;
+manual runs upload artifacts without publishing a release.
 
 When ready to publish, tag the intended release commit and push that tag. The
 **Release** workflow builds the apps and publishes the downloads for that tag.
@@ -87,6 +87,30 @@ Each platform also uploads its package independently to the run under
 so successful packages remain available even if another platform fails. Artifact
 downloads require signing in to GitHub; extract the artifact download first,
 then extract the app ZIP inside it.
+
+### Testing a branch with packaged builds
+
+Install [GitHub CLI](https://cli.github.com) and run `gh auth login` first.
+The target branch must include the manual Release workflow trigger.
+
+```powershell
+# Windows: request a build, then download and launch after it completes.
+./scripts/branch-build.ps1 -Branch codex/edge-position -Build
+./scripts/branch-build.ps1 -Branch codex/edge-position -Launch
+```
+
+```sh
+# macOS or Linux (macOS also requires unzip).
+bash scripts/branch-build.sh codex/edge-position --build
+bash scripts/branch-build.sh codex/edge-position --launch
+```
+
+The scripts reuse successful builds of the current remote commit, print the
+commit and run URL, and download into a unique folder under Downloads.
+Quit other Lan Mouse instances before launching. Use `-RunId ID` on Windows
+or `--run-id ID` on macOS/Linux to test the same completed run across machines.
+Manual build artifacts expire after one day. These commands do not switch
+your local branch and require no local Rust or GTK development tools.
 
 <details>
     <summary>Arch Linux</summary>
