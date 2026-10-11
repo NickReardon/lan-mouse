@@ -126,7 +126,6 @@ fn run_gui() -> Result<(), LanMouseError> {
     instance::mark_internal_child(&mut command);
     let mut service = command.spawn()?;
     let ready = instance::wait_until_ready(&mut service);
-    drop(startup);
     let connection = match ready {
         Ok(connection) => connection,
         Err(error) => {
@@ -134,6 +133,7 @@ fn run_gui() -> Result<(), LanMouseError> {
             return Err(error.into());
         }
     };
+    drop(startup);
     let result = lan_mouse_gtk::run(config::local_commit(), connection);
     stop_child(&mut service)?;
     result?;

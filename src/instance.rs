@@ -368,8 +368,8 @@ pub fn prepare(gui: bool, daemon: bool) -> Result<Option<Startup>, StartupError>
         return Ok(None);
     }
     // Only send lifecycle commands after the endpoint identifies a verified daemon.
-    let cooperative =
-        identify().filter(|pid| existing.iter().any(|p| p.pid.as_u32() == *pid && p.daemon));
+    // A build without GTK can run the service without a `daemon` argument.
+    let cooperative = identify().filter(|pid| existing.iter().any(|p| p.pid.as_u32() == *pid));
     if let Some(pid) = cooperative {
         request_shutdown(pid);
     }
