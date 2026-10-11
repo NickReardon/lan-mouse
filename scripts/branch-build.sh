@@ -5,6 +5,7 @@ usage() {
     cat <<'EOF'
 Usage: bash scripts/branch-build.sh BRANCH [--build | --launch]
        bash scripts/branch-build.sh --run-id ID [--launch]
+       bash scripts/branch-build.sh build BRANCH [--create-worktree]
 Options:
   --build             Reuse a current build or request one, then exit.
   --launch            Download, extract, and launch (quit other instances first).
@@ -15,6 +16,12 @@ Options:
 Requires GitHub CLI (gh auth login); macOS also needs unzip.
 EOF
 }
+
+if [[ "${1:-}" == build ]]; then
+    script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+    bash "$script_dir/local-build.sh" "${@:2}"
+    exit $?
+fi
 
 branch='' run_id='' build=false launch=false
 repo='NickReardon/lan-mouse'

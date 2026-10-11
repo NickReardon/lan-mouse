@@ -1,6 +1,8 @@
 <#
 .SYNOPSIS
-Build or download a branch package using GitHub CLI (Windows).
+Build a local branch or download a GitHub branch package (Windows).
+.EXAMPLE
+./scripts/branch-build.ps1 build codex/edge-position -CreateWorktree
 .EXAMPLE
 ./scripts/branch-build.ps1 -Branch feature/MyChange -Build
 .EXAMPLE
@@ -10,7 +12,11 @@ Build or download a branch package using GitHub CLI (Windows).
 #>
 [CmdletBinding(DefaultParameterSetName = 'Branch')]
 param(
+    [Parameter(Mandatory, Position = 0, ParameterSetName = 'Local')]
+    [ValidateSet('build')]
+    [string]$Action,
     [Parameter(Mandatory, ParameterSetName = 'Branch')]
+    [Parameter(Mandatory, Position = 1, ParameterSetName = 'Local')]
     [ValidateNotNullOrEmpty()]
     [string]$Branch,
     [Parameter(Mandatory, ParameterSetName = 'Run')]
@@ -19,12 +25,18 @@ param(
     [Parameter(ParameterSetName = 'Branch')]
     [switch]$Build,
     [switch]$Launch,
+    [Parameter(ParameterSetName = 'Local')]
+    [switch]$CreateWorktree,
     [string]$Repo = 'NickReardon/lan-mouse',
     [string]$Destination = (Join-Path $HOME 'Downloads')
 )
 
 $ErrorActionPreference = 'Stop'
 if ($env:OS -ne 'Windows_NT') { throw 'Use branch-build.sh on macOS or Linux.' }
+if ($Action -eq 'build') {
+    & (Join-Path $PSScriptRoot 'local-build.ps1') -Branch $Branch -CreateWorktree:$CreateWorktree
+    return
+}
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     throw 'Install GitHub CLI (https://cli.github.com) and run gh auth login first.'
 }
