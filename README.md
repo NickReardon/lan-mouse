@@ -125,8 +125,10 @@ caches and intermediate files. Newly created worktrees use the same flat naming
 under `.worktrees/`; existing checkouts are reused at their current paths.
 For `codex/edge-position`, a normal debug build produces
 `builds/codex-edge-position/debug/lan-mouse.exe` on Windows, or `lan-mouse` on
-macOS/Linux. No output is copied into worktrees and no runtime libraries are
-bundled. The scripts print the source checkout, commit, and output folder;
+macOS/Linux. No output is copied into worktrees. Windows builds copy the GTK
+runtime DLLs beside the executable so it can be launched directly without
+setting PATH. macOS/Linux builds use installed runtime libraries.
+The scripts print the source checkout, commit, and output folder;
 they do not launch the result automatically. A branch marker prevents different
 branch names that flatten to the same folder from sharing build artifacts.
 

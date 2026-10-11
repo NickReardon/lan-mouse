@@ -90,6 +90,16 @@ try {
         & cargo build --locked -p lan-mouse --target-dir $targetDir
         if ($LASTEXITCODE -ne 0) { throw "Cargo build failed (exit $LASTEXITCODE)." }
     } finally { Pop-Location }
+    # A directly launched executable cannot inherit this helper's temporary PATH.
+    # Copy the runtime's transitive DLL dependencies beside the executable, as
+    # the Windows release package does.
+    $executableDir = Join-Path $targetDir 'debug'
+    $executable = Join-Path $executableDir 'lan-mouse.exe'
+    if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+        throw "Missing executable: $executable"
+    }
+    Get-ChildItem -LiteralPath $gtkBin -Filter '*.dll' -File |
+        Copy-Item -Destination $executableDir -Force
     Write-Host "Build output: $targetDir"
 } finally {
     $env:PATH = $oldPath
