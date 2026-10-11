@@ -20,7 +20,9 @@ mod connect;
 mod connect_async;
 mod listen;
 
-pub use connect::{FrontendEventReader, FrontendRequestWriter, connect, try_connect};
+pub use connect::{
+    FrontendEventReader, FrontendRequestWriter, connect, connect_verified, try_connect,
+};
 pub use connect_async::{AsyncFrontendEventReader, AsyncFrontendRequestWriter, connect_async};
 pub use listen::AsyncFrontendListener;
 
@@ -189,6 +191,10 @@ pub struct ClientState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FrontendEvent {
+    /// Identifies the daemon for launch-time readiness and targeted shutdown.
+    InstanceInfo { pid: u32 },
+    /// The daemon is shutting down; frontends must quit without restarting it.
+    ShuttingDown,
     /// a client was created
     Created(ClientHandle, ClientConfig, ClientState),
     /// no such client
@@ -230,6 +236,10 @@ pub enum FrontendEvent {
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum FrontendRequest {
+    /// Request the daemon's process identity (local IPC protocol 0.4).
+    Identify,
+    /// Gracefully stop this daemon and its frontends, only if the PID matches.
+    Shutdown { pid: u32 },
     /// activate/deactivate client
     Activate(ClientHandle, bool),
     /// add a new client
