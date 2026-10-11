@@ -73,6 +73,9 @@ sysinfo = { version = "0.33.1", default-features = false, features = ["system"] 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.148"
 
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0.12"
+
 [features]
 default = [
     "gtk",

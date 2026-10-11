@@ -13,7 +13,7 @@ and other open source tools like [Deskflow](https://github.com/deskflow/deskflow
 
 Focus lies on performance, ease of use and a maintainable implementation that can be expanded to support additional backends for e.g. Android, iOS, ... in the future.
 
-***blazingly fast™*** because it's written in rust.
+***blazingly fastâ„¢*** because it's written in rust.
 
 - _Now with a gtk frontend_
 
@@ -160,6 +160,12 @@ Lan Mouse can be installed from the [winget community repositories](https://gith
 winget install lan-mouse
 ```
 
+Closing the window hides Lan Mouse to the notification area (system tray) and
+keeps sharing active. Click the tray icon, or choose **Open Lan Mouse** from its
+menu, to reopen the window. Choose **Quit Lan Mouse** from the tray menu or the
+window menu to exit and stop the sharing daemon the app started. If the tray
+icon cannot be created, closing the window quits Lan Mouse.
+
 </details>
 
 <details>
@@ -257,6 +263,18 @@ git config core.hooksPath .githooks
 ```
 
 The `pre-commit` script runs `cargo fmt --all` (and fails if files were modified), `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and `cargo test --workspace --all-features`.
+
+### App icons
+
+The Windows icon (`build-aux/windows/lan-mouse.ico`, embedded in `lan-mouse.exe`
+and used by the tray) and the macOS Dock and menu bar images
+(`lan-mouse-gtk/resources/macos/`) are generated from
+`lan-mouse-gtk/resources/de.feschber.LanMouse.svg` and committed. After
+changing the SVG, regenerate them with `rsvg-convert` and Pillow installed:
+
+```sh
+python scripts/make-app-icons.py
+```
 
 ### Dependencies & Compiling from Source
 <details>
@@ -371,6 +389,10 @@ The fingerprint for authorization can be found under the general section of your
 It is of the form "aa:bb:cc:..."
 
 Authorized devices can be persisted using the configuration file (see [Configuration](#configuration)).
+
+On Windows and macOS, closing the window keeps Lan Mouse running in the
+notification area or menu bar. Use **Quit Lan Mouse** in the window menu or the
+tray/menu bar menu to exit.
 
 If the device still can not be entered, make sure you have UDP port `4242` (or the one selected) opened up in your firewall.
 </details>

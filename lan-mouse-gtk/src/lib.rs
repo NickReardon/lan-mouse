@@ -9,6 +9,8 @@ mod macos_privacy;
 #[cfg(target_os = "macos")]
 mod macos_status_item;
 mod window;
+#[cfg(windows)]
+mod windows_tray;
 
 use std::{
     env, process, str,
@@ -269,6 +271,9 @@ fn setup_actions(app: &adw::Application) {
         }
     });
     app.add_action(&quit_action);
+    // GTK's macOS backend already binds Cmd+Q to app.quit.
+    #[cfg(not(target_os = "macos"))]
+    app.set_accels_for_action("app.quit", &["<primary>q"]);
 }
 
 // Set up a global menu
@@ -318,6 +323,10 @@ fn build_ui(
     });
 
     let window = Window::new(app, frontend_tx);
+    #[cfg(windows)]
+    if let Err(e) = windows_tray::setup(app, &window) {
+        log::warn!("could not create tray icon; closing the window will quit Lan Mouse: {e}");
+    }
     #[cfg(target_os = "macos")]
     {
         window.connect_close_request(|window| {
