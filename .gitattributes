@@ -1,0 +1,6 @@
+# Match .editorconfig and keep text diffs consistent across platforms.
+* text=auto eol=lf
+
+# Native Windows command scripts require CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
