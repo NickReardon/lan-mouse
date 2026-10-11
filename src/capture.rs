@@ -375,6 +375,16 @@ impl CaptureTask {
             None
         };
         if begin {
+            if let Some(fraction) = fraction {
+                let percent = f64::from(fraction) * 100.0 / f64::from(u16::MAX);
+                let edge = self.get_pos(handle);
+                log::info!(
+                    "edge-position handoff: client={handle} type={:?} leaving={edge} entering={} position={percent:.3}% from top/left ({:.3}% from bottom/right) fraction={fraction}",
+                    self.get_type(handle),
+                    edge.opposite(),
+                    100.0 - percent
+                );
+            }
             self.event_tx
                 .send(ICaptureEvent::CaptureBegin(handle, fraction))
                 .expect("channel closed");

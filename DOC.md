@@ -108,3 +108,21 @@ reconfiguration, and gaps. Verify continued movement after handoff retries,
 legacy-peer operation, and that held keys release on disconnect/release bind.
 
 Tracked in [fork issue #17](https://github.com/NickReardon/lan-mouse/issues/17).
+
+### Edge-position diagnostics
+
+At the default info log level, `edge-position` messages report each exit,
+handoff (including `EnterOnly` return crossings), entry target, and immediate
+cursor read-back. Percentages are measured from the top on left/right edges
+and from the left on top/bottom edges: 90% from the top means 10% from the bottom.
+`requested` is the transmitted fraction, `mapped` includes monitor-gap/corner
+clamping, and `actual` is an immediate OS cursor query after positioning.
+Coordinates, desktop bounds, and read-back deltas help identify coordinate
+scaling differences. A read-back is a snapshot, not proof that later movement
+cannot change the cursor position.
+
+To investigate inconsistent placement, collect matching `edge-position` lines
+from both computers for an outward crossing and its return. Include the direction,
+monitor layout/scaling, and whether the cursor drifts after entry. The reported
+downward drift remains under investigation; these diagnostics do not change
+positioning behavior.

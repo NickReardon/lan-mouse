@@ -317,12 +317,15 @@ fn check_client_activation(wparam: WPARAM, lparam: LPARAM) -> bool {
     let fraction = DISPLAYS.with_borrow(|(displays, _)| {
         let displays = display_util::rects(displays);
         input_event::edge::bounds(&displays).map(|b| {
-            input_event::edge::fraction(
+            let fraction = input_event::edge::fraction(
                 b,
                 active.edge(),
                 f64::from(entry_point.0),
                 f64::from(entry_point.1),
-            )
+            );
+            let percent = f64::from(fraction) * 100.0 / f64::from(u16::MAX);
+            log::info!("edge-position exit: backend=windows edge={active} position={percent:.3}% from top/left cursor={entry_point:?} previous={prev_pos:?} crossing={curr_pos:?} bounds={b:?}");
+            fraction
         })
     });
     blocking_send_event(
@@ -453,19 +456,63 @@ fn update_clients(request: ClientUpdate) {
     match request {
         ClientUpdate::ReleaseAt(pos, fraction, done) => {
             ACTIVE_CLIENT.take();
-            let point = DISPLAYS.with_borrow_mut(|(displays, generation)| {
+            let (point, bounds) = DISPLAYS.with_borrow_mut(|(displays, generation)| {
                 update_display_regions(displays, generation);
-                input_event::edge::entry(&display_util::rects(displays), pos.edge(), fraction)
+                let displays = display_util::rects(displays);
+                (
+                    input_event::edge::entry(&displays, pos.edge(), fraction),
+                    input_event::edge::bounds(&displays),
+                )
             });
             let result = if let Some((x, y)) = point {
+                let requested = f64::from(fraction) * 100.0 / f64::from(u16::MAX);
+                log::info!(
+                    "edge-position entry: backend=windows edge={pos} requested={requested:.3}% from top/left target=({x:.3}, {y:.3}) bounds={bounds:?}"
+                );
                 PREV_POS.replace(Some((x.round() as i32, y.round() as i32)));
-                unsafe {
+                let result = unsafe {
                     windows::Win32::UI::WindowsAndMessaging::SetCursorPos(
                         x.round() as i32,
                         y.round() as i32,
                     )
                 }
-                .map_err(|e| super::CaptureError::Io(std::io::Error::other(e.to_string())))
+                .map_err(|e| super::CaptureError::Io(std::io::Error::other(e.to_string())));
+                if result.is_ok() {
+                    let mut actual = windows::Win32::Foundation::POINT::default();
+                    match unsafe {
+                        windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut actual)
+                    } {
+                        Ok(()) => {
+                            if let Some(bounds) = bounds {
+                                let mapped = f64::from(input_event::edge::fraction(
+                                    bounds,
+                                    pos.edge(),
+                                    x,
+                                    y,
+                                )) * 100.0
+                                    / f64::from(u16::MAX);
+                                let observed = f64::from(input_event::edge::fraction(
+                                    bounds,
+                                    pos.edge(),
+                                    f64::from(actual.x),
+                                    f64::from(actual.y),
+                                )) * 100.0
+                                    / f64::from(u16::MAX);
+                                log::info!(
+                                    "edge-position entry-readback: backend=windows edge={pos} requested={requested:.3}% mapped={mapped:.3}% actual={observed:.3}% from top/left cursor=({}, {}) delta=({:.3}, {:.3})",
+                                    actual.x,
+                                    actual.y,
+                                    f64::from(actual.x) - x,
+                                    f64::from(actual.y) - y
+                                );
+                            }
+                        }
+                        Err(error) => log::warn!(
+                            "edge-position entry-readback failed: backend=windows edge={pos}: {error}"
+                        ),
+                    }
+                }
+                result
             } else {
                 Err(super::CaptureError::Io(std::io::Error::other(
                     "no desktop display for cursor entry",

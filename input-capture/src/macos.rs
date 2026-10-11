@@ -174,8 +174,41 @@ impl InputCaptureState {
                     })
                     .collect();
                 if let Some((x, y)) = input_event::edge::entry(&displays, pos.edge(), fraction) {
+                    let bounds =
+                        input_event::edge::bounds(&displays).expect("entry requires a display");
+                    let requested = f64::from(fraction) * 100.0 / f64::from(u16::MAX);
+                    let mapped = f64::from(input_event::edge::fraction(bounds, pos.edge(), x, y))
+                        * 100.0
+                        / f64::from(u16::MAX);
+                    log::info!(
+                        "edge-position entry: backend=macos edge={pos} requested={requested:.3}% mapped={mapped:.3}% from top/left target=({x:.3}, {y:.3}) bounds={bounds:?}"
+                    );
                     CGDisplay::warp_mouse_cursor_position(CGPoint::new(x, y))
                         .map_err(CaptureError::WarpCursor)?;
+                    match CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+                        .and_then(CGEvent::new)
+                    {
+                        Ok(event) => {
+                            let actual = event.location();
+                            let observed = f64::from(input_event::edge::fraction(
+                                bounds,
+                                pos.edge(),
+                                actual.x,
+                                actual.y,
+                            )) * 100.0
+                                / f64::from(u16::MAX);
+                            log::info!(
+                                "edge-position entry-readback: backend=macos edge={pos} requested={requested:.3}% mapped={mapped:.3}% actual={observed:.3}% from top/left cursor=({:.3}, {:.3}) delta=({:.3}, {:.3})",
+                                actual.x,
+                                actual.y,
+                                actual.x - x,
+                                actual.y - y
+                            );
+                        }
+                        Err(()) => log::warn!(
+                            "edge-position entry-readback failed: backend=macos edge={pos}"
+                        ),
+                    }
                 }
                 let _ = done.send(());
             }
@@ -556,12 +589,15 @@ fn create_event_tap<'a>(
                     bottom: b.ymax,
                 };
                 let location = cg_ev.location();
-                res_events.push(CaptureEvent::BeginAt(input_event::edge::fraction(
-                    bounds,
-                    new_pos.edge(),
+                let fraction =
+                    input_event::edge::fraction(bounds, new_pos.edge(), location.x, location.y);
+                let percent = f64::from(fraction) * 100.0 / f64::from(u16::MAX);
+                log::info!(
+                    "edge-position exit: backend=macos edge={new_pos} position={percent:.3}% from top/left cursor=({:.3}, {:.3}) bounds={bounds:?}",
                     location.x,
-                    location.y,
-                )));
+                    location.y
+                );
+                res_events.push(CaptureEvent::BeginAt(fraction));
                 notify_tx
                     .blocking_send(ProducerEvent::Grab(new_pos))
                     .expect("Failed to send notification");
