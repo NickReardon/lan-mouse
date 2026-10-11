@@ -88,6 +88,43 @@ so successful packages remain available even if another platform fails. Artifact
 downloads require signing in to GitHub; extract the artifact download first,
 then extract the app ZIP inside it.
 
+### Building a branch locally
+
+Build an existing branch checkout without switching the current checkout:
+
+```powershell
+./scripts/branch-build.ps1 build codex/edge-position
+# Create a missing checkout under the base repository's .worktrees/:
+./scripts/branch-build.ps1 build codex/edge-position -CreateWorktree
+```
+
+```sh
+bash scripts/branch-build.sh build codex/edge-position
+bash scripts/branch-build.sh build codex/edge-position --create-worktree
+```
+
+This runs `cargo build --locked -p lan-mouse` in the selected checkout, including
+its uncommitted changes. A missing worktree is created only with the explicit
+flag. If the branch is not local, the helper fetches it from origin and creates
+a tracking branch. Both `codex/edge-position` and `origin/codex/edge-position`
+select that branch. A nonexistent branch or failed fetch stops the command.
+Rust and the platform's GTK development dependencies are
+required. Windows detects the standard `C:\gtk-build\gtk\x64\release` installation
+or uses `PKG_CONFIG`/pkg-config from the environment.
+
+The helper can be called from the base repo or any linked worktree; it finds
+the requested branch through Git without switching branches or changing your
+current directory. Cargo's target directory is the **base repository's** ignored
+`builds/<branch-with-slashes-replaced-by-hyphens>/` folder, including all dependency
+caches and intermediate files. Newly created worktrees use the same flat naming
+under `.worktrees/`; existing checkouts are reused at their current paths.
+For `codex/edge-position`, a normal debug build produces
+`builds/codex-edge-position/debug/lan-mouse.exe` on Windows, or `lan-mouse` on
+macOS/Linux. No output is copied into worktrees and no runtime libraries are
+bundled. The scripts print the source checkout, commit, and output folder;
+they do not launch the result automatically. A branch marker prevents different
+branch names that flatten to the same folder from sharing build artifacts.
+
 ### Testing a branch with packaged builds
 
 Install [GitHub CLI](https://cli.github.com) and run `gh auth login` first.
