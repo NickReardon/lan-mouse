@@ -403,14 +403,6 @@ copy_runtime_data() {
 
 copy_runtime_data
 
-# cargo-bundle preserves the source path under Contents/Resources (so
-# `target/menubar-template.png` lands at `Resources/target/...`). Flatten it
-# so NSBundle pathForResource: finds the file at the Resources root.
-if [ -f "$resources_path/target/menubar-template.png" ]; then
-  mv "$resources_path/target/menubar-template.png" "$resources_path/menubar-template.png"
-  rmdir "$resources_path/target" 2>/dev/null || true
-fi
-
 # Ensure the main executable has our Frameworks path in its RPATH
 if ! otool -l "$exec_path" | grep -qF "@executable_path/../Frameworks"; then
   echo "Adding RPATH to $exec_path"

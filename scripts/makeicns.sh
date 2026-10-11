@@ -89,14 +89,6 @@ cp "$workdir/16.png"   "$iconset"/icon_16x16.png
 
 mkdir -p "$(dirname "$icns")"
 
-# Menu bar template icon: flatten all RGB channels to 0 (black) while keeping
-# alpha so the artwork reads as a clean silhouette. NSStatusBarButton tints
-# template images to match the menu bar appearance in light and dark modes.
-menubar_template="$(dirname "$icns")/menubar-template.png"
-rsvg-convert -w 44 -h 44 "$svg" -o "$workdir/menubar-44.png"
-magick "$workdir/menubar-44.png" -channel RGB -evaluate set 0 +channel \
-    "$menubar_template"
-
 if ! iconutil -c icns "$iconset" -o "$icns"; then
     if ! command -v perl >/dev/null 2>&1; then
         echo "iconutil failed and perl is not available for the fallback icns writer" >&2

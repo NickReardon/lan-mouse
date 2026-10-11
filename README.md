@@ -13,7 +13,7 @@ and other open source tools like [Deskflow](https://github.com/deskflow/deskflow
 
 Focus lies on performance, ease of use and a maintainable implementation that can be expanded to support additional backends for e.g. Android, iOS, ... in the future.
 
-***blazingly fastâ„¢*** because it's written in rust.
+***blazingly fast™*** because it's written in rust.
 
 - _Now with a gtk frontend_
 
@@ -146,7 +146,7 @@ dnf install lan-mouse
 - Unzip it
 - Remove the quarantine with `xattr -rd com.apple.quarantine "Lan Mouse.app"`
 - Launch the app
-- Use the menu bar item to open the settings window or quit Lan Mouse. Bundled macOS builds run as a menu bar app and do not keep a Dock icon visible.
+- Use the menu bar item to open the settings window or quit Lan Mouse. Lan Mouse shows a Dock icon while its window is open; closing the window hides it and keeps sharing active from the menu bar.
 - Grant accessibility permissions in System Preferences
 
 </details>
