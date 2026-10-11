@@ -221,6 +221,12 @@ For a detailed list of available features, checkout the [Cargo.toml](./Cargo.tom
 
 ## Development
 
+For agent collaboration, start with [AGENTS.md](AGENTS.md) and
+[CONTRIBUTING.md](CONTRIBUTING.md). Work is planned and approved in focused
+issues before claiming or branching, then implemented in isolated `.worktrees/`
+checkouts with frequent commits, pushes, and a draft PR. Claude Code reads the
+same policy through [CLAUDE.md](CLAUDE.md).
+
 ### Git pre-commit hook
 
 This repository includes a local git hooks directory `.githooks/` with a `pre-commit` script that enforces formatting, lints, and tests before allowing a commit.  It is optional to enable it, but it will prevent you from committing code with failing unit tests or that needs clippy/fmt fixes. To enable the hook locally:
