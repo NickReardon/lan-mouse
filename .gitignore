@@ -13,3 +13,4 @@ extfile.conf
 # flatpak files
 .flatpak-builder
 repo
+.DS_Store
