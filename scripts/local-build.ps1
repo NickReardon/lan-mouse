@@ -21,6 +21,7 @@ if ($Branch.StartsWith('origin/')) {
     if ($LASTEXITCODE -ne 0) { $Branch = $Branch.Substring(7) }
 }
 Invoke-Git check-ref-format --branch $Branch | Out-Null
+$folderName = $Branch.Replace('/', '-')
 # Older base branches may not have the new .gitignore entries yet.
 foreach ($generatedDir in @('.worktrees', 'builds')) {
     & git -C $baseRepo check-ignore --quiet -- "$generatedDir/"
@@ -38,7 +39,7 @@ if (-not $sourceDir) {
     if (-not $CreateWorktree) {
         throw "No checkout for '$Branch'. Use -CreateWorktree to create one under the base repo's .worktrees/."
     }
-    $sourceDir = Join-Path $baseRepo ".worktrees/$Branch"
+    $sourceDir = Join-Path $baseRepo ".worktrees/$folderName"
     & git -C $baseRepo show-ref --verify --quiet "refs/heads/$Branch"
     if ($LASTEXITCODE -eq 0) {
         Invoke-Git -C $baseRepo worktree add -- $sourceDir $Branch | Out-Host
@@ -73,7 +74,14 @@ $oldPkgConfig = $env:PKG_CONFIG
 try {
     $env:PKG_CONFIG = $pkgConfig
     $env:PATH = "$gtkBin;$oldPath"
-    $targetDir = Join-Path $baseRepo "builds/$Branch"
+    $targetDir = Join-Path $baseRepo "builds/$folderName"
+    $branchMarker = Join-Path $targetDir '.branch'
+    if ((Test-Path -LiteralPath $branchMarker) -and
+        (Get-Content -LiteralPath $branchMarker -Raw).TrimEnd("`r", "`n") -cne $Branch) {
+        throw "Build folder '$targetDir' already belongs to another branch."
+    }
+    New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+    Set-Content -LiteralPath $branchMarker -Value $Branch
     $commit = Invoke-Git -C $sourceDir rev-parse HEAD
     Write-Host "Building $Branch ($commit) from $sourceDir"
     # Run from the selected checkout so Cargo uses its configuration/build data.

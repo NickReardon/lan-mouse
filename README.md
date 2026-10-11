@@ -115,12 +115,15 @@ or uses `PKG_CONFIG`/pkg-config from the environment.
 The helper can be called from the base repo or any linked worktree; it finds
 the requested branch through Git without switching branches or changing your
 current directory. Cargo's target directory is the **base repository's** ignored
-`builds/<branch>/` folder, including all dependency caches and intermediate files.
+`builds/<branch-with-slashes-replaced-by-hyphens>/` folder, including all dependency
+caches and intermediate files. Newly created worktrees use the same flat naming
+under `.worktrees/`; existing checkouts are reused at their current paths.
 For `codex/edge-position`, a normal debug build produces
-`builds/codex/edge-position/debug/lan-mouse.exe` on Windows, or `lan-mouse` on
+`builds/codex-edge-position/debug/lan-mouse.exe` on Windows, or `lan-mouse` on
 macOS/Linux. No output is copied into worktrees and no runtime libraries are
 bundled. The scripts print the source checkout, commit, and output folder;
-they do not launch the result automatically.
+they do not launch the result automatically. A branch marker prevents different
+branch names that flatten to the same folder from sharing build artifacts.
 
 ### Testing a branch with packaged builds
 

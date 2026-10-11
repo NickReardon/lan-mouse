@@ -15,6 +15,7 @@ if [[ "$branch" == origin/* ]] && ! git -C "$base_repo" show-ref --verify --quie
 fi
 git check-ref-format --branch "$branch" >/dev/null
 # Keep generated files ignored even when the base checkout predates this script.
+folder_name=${branch//\//-}
 for generated_dir in .worktrees builds; do
     if git -C "$base_repo" check-ignore --quiet -- "$generated_dir/"; then
         continue
@@ -37,7 +38,7 @@ if [[ -z "$source_dir" ]]; then
         echo "No checkout for '$branch'. Use --create-worktree to create one under the base repo's .worktrees/." >&2
         exit 1
     fi
-    source_dir="$base_repo/.worktrees/$branch"
+    source_dir="$base_repo/.worktrees/$folder_name"
     if git -C "$base_repo" show-ref --verify --quiet "refs/heads/$branch"; then
         git -C "$base_repo" worktree add -- "$source_dir" "$branch"
     else
@@ -56,7 +57,13 @@ case "$(uname -s)" in
     Darwin|Linux) ;;
     *) echo 'Use branch-build.ps1 on Windows.' >&2; exit 1 ;;
 esac
-target_dir="$base_repo/builds/$branch"
+target_dir="$base_repo/builds/$folder_name"
+if [[ -f "$target_dir/.branch" && "$(cat "$target_dir/.branch")" != "$branch" ]]; then
+    echo "Build folder '$target_dir' already belongs to another branch." >&2
+    exit 1
+fi
+mkdir -p -- "$target_dir"
+printf '%s\n' "$branch" > "$target_dir/.branch"
 commit=$(git -C "$source_dir" rev-parse HEAD)
 echo "Building $branch ($commit) from $source_dir"
 # A subshell preserves the caller's working directory and uses branch-local config.
