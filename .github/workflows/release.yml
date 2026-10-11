@@ -119,7 +119,7 @@ jobs:
     - name: Create Archive
       run: |
         mkdir "lan-mouse-windows"
-        Get-Childitem -Path "C:\\gtk-build\\gtk\\x64\\release\\bin\\*.dll" -File -Recurse | Copy-Item -Destination "lan-mouse-windows"
+        ./scripts/copy-windows-runtime.ps1 -GtkPrefix "C:\gtk-build\gtk\x64\release" -Destination "lan-mouse-windows"
         Copy-Item -Path "target\release\lan-mouse.exe" -Destination "lan-mouse-windows"
         Compress-Archive -Path "lan-mouse-windows\*" -DestinationPath lan-mouse-windows-x86_64.zip
     - name: Upload build artifact

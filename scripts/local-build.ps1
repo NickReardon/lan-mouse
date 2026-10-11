@@ -98,8 +98,7 @@ try {
     if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
         throw "Missing executable: $executable"
     }
-    Get-ChildItem -LiteralPath $gtkBin -Filter '*.dll' -File |
-        Copy-Item -Destination $executableDir -Force
+    & (Join-Path $PSScriptRoot 'copy-windows-runtime.ps1') -GtkPrefix $gtkPrefix -Destination $executableDir
     Write-Host "Build output: $targetDir"
 } finally {
     $env:PATH = $oldPath
