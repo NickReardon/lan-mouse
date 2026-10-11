@@ -15,6 +15,9 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
+};
 use windows::core::{PCWSTR, w};
 
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -176,6 +179,19 @@ fn start_routine(
     request_buffer: Arc<Mutex<Vec<ClientUpdate>>>,
 ) {
     EVENT_TX.replace(Some(event_tx));
+
+    // Hook coordinates and display modes are physical pixels. Without this,
+    // SetCursorPos/GetCursorPos use scaled coordinates on high-DPI displays
+    // and edge entry lands at the wrong position.
+    if unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }
+        .0
+        .is_null()
+    {
+        log::warn!(
+            "could not enable per-monitor DPI awareness; edge entry may be misplaced on scaled displays"
+        );
+    }
+
     /* communicate thread id */
     {
         let (cnd, mtx) = &*ready;

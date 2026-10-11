@@ -85,7 +85,9 @@ the bottom enters the left edge 10% from the bottom. Top/bottom transitions
 preserve relative width. Resolution and desktop origin can differ.
 
 Each device uses the bounding extent of its whole desktop, in its native cursor
-coordinate system (Windows desktop coordinates; macOS logical coordinates).
+coordinate system (Windows physical desktop pixels, with the capture thread
+per-monitor DPI aware so scaled displays match the hook coordinates; macOS
+logical coordinates).
 The coordinate is measured from the top or left and quantized to a u16. Entry
 is inset from the edge to prevent an immediate return crossing. For irregular
 multi-monitor layouts, a fraction falling into a gap selects the nearest real
