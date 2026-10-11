@@ -91,6 +91,7 @@ impl Capture {
             release_bind: Rc::new(RefCell::new(release_bind)),
             state: Default::default(),
             entry_fraction: None,
+            last_entry: None,
         };
         let task = spawn_local(capture_task.run());
         Self {
@@ -184,9 +185,35 @@ struct CaptureTask {
     request_rx: Receiver<CaptureRequest>,
     state: State,
     entry_fraction: Option<u16>,
+    /// Most recent cursor placement for an incoming crossing.
+    last_entry: Option<(Position, u16, Instant)>,
 }
 
+/// A peer configured in both directions reports one crossing twice: `Leave`
+/// to our capture and `Enter` to our emulation, with the same position.
+const DUPLICATE_ENTRY_WINDOW: Duration = Duration::from_millis(100);
+
 impl CaptureTask {
+    /// Place the cursor for an incoming crossing, skipping a repeat of the
+    /// placement that was just made for the same crossing.
+    async fn place_entry(
+        &mut self,
+        capture: &mut InputCapture,
+        pos: Position,
+        fraction: u16,
+    ) -> Result<(), CaptureError> {
+        if let Some((prev_pos, prev_fraction, at)) = self.last_entry {
+            if prev_pos == pos && prev_fraction == fraction && at.elapsed() < DUPLICATE_ENTRY_WINDOW
+            {
+                log::debug!("edge-position entry: skipping duplicate placement on {pos} edge");
+                return Ok(());
+            }
+        }
+        capture.release_at(pos, fraction).await?;
+        self.last_entry = Some((pos, fraction, Instant::now()));
+        Ok(())
+    }
+
     fn add_capture(&mut self, handle: CaptureHandle, pos: Position, capture_type: CaptureType) {
         self.captures.push((handle, pos, capture_type));
     }
@@ -311,7 +338,7 @@ impl CaptureTask {
                             self.release_capture(capture).await?;
                             if was_active {
                                 if let Some(fraction) = fraction {
-                                    capture.release_at(position, fraction).await?;
+                                    self.place_entry(capture, position, fraction).await?;
                                 }
                             }
                         },
@@ -323,7 +350,7 @@ impl CaptureTask {
                     CaptureRequest::Release => self.release_capture(capture).await?,
                     CaptureRequest::ReleaseAt(pos, fraction, done) => {
                         self.release_capture(capture).await?;
-                        let result = capture.release_at(pos, fraction).await;
+                        let result = self.place_entry(capture, pos, fraction).await;
                         let _ = done.send(result.is_ok());
                         result?;
                     }
