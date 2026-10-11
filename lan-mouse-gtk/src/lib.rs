@@ -10,7 +10,13 @@ mod macos_privacy;
 mod macos_status_item;
 mod window;
 
-use std::{env, process, str, sync::OnceLock};
+use std::{
+    env, process, str,
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use gtk::CssProvider;
 use window::Window;
@@ -20,6 +26,18 @@ use window::Window;
 /// peer's [`lan_mouse_ipc::ClientState::peer_commit`] for the
 /// soft-warn version-mismatch indicator.
 pub(crate) static LOCAL_COMMIT: OnceLock<[u8; 8]> = OnceLock::new();
+
+/// Set when the daemon announces it is shutting down.
+static DAEMON_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Why the frontend stopped, so the launcher knows whether to stop the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exit {
+    /// The app was quit; the daemon is still running.
+    Quit,
+    /// The daemon announced it is shutting down and will exit on its own.
+    DaemonShutdown,
+}
 
 /// Convenience: returns the local commit as an 8-char ASCII string,
 /// or a placeholder if unset (which would indicate a programmer
@@ -108,7 +126,7 @@ pub fn run(
         lan_mouse_ipc::FrontendEventReader,
         lan_mouse_ipc::FrontendRequestWriter,
     ),
-) -> Result<(), GtkError> {
+) -> Result<Exit, GtkError> {
     log::debug!("running gtk frontend");
     LOCAL_COMMIT
         .set(local_commit)
@@ -118,7 +136,10 @@ pub fn run(
     let ret = gtk_main(connection);
 
     match ret {
-        glib::ExitCode::SUCCESS => Ok(()),
+        glib::ExitCode::SUCCESS if DAEMON_SHUTTING_DOWN.load(Ordering::Relaxed) => {
+            Ok(Exit::DaemonShutdown)
+        }
+        glib::ExitCode::SUCCESS => Ok(Exit::Quit),
         e => Err(GtkError::NonZeroExitCode(e.value())),
     }
 }
@@ -342,6 +363,7 @@ fn build_ui(
                 match notify {
                     FrontendEvent::InstanceInfo { .. } => {}
                     FrontendEvent::ShuttingDown => {
+                        DAEMON_SHUTTING_DOWN.store(true, Ordering::Relaxed);
                         if let Some(app) = window.application() {
                             app.quit();
                         }

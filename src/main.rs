@@ -129,23 +129,28 @@ fn run_gui() -> Result<(), LanMouseError> {
     let connection = match ready {
         Ok(connection) => connection,
         Err(error) => {
-            stop_child(&mut service)?;
+            stop_child(&mut service, true)?;
             return Err(error.into());
         }
     };
     drop(startup);
     let result = lan_mouse_gtk::run(config::local_commit(), connection);
-    stop_child(&mut service)?;
+    // If the daemon announced its own shutdown, it is already stopping.
+    let request = !matches!(result, Ok(lan_mouse_gtk::Exit::DaemonShutdown));
+    stop_child(&mut service, request)?;
     result?;
     Ok(())
 }
 
+/// Wait for the owned daemon to exit, first asking it to shut down if `request`.
 #[cfg(feature = "gtk")]
-fn stop_child(child: &mut Child) -> Result<(), io::Error> {
+fn stop_child(child: &mut Child, request: bool) -> Result<(), io::Error> {
     if child.try_wait()?.is_some() {
         return Ok(());
     }
-    instance::request_shutdown(child.id());
+    if request {
+        instance::request_shutdown(child.id());
+    }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         if child.try_wait()?.is_some() {
