@@ -192,17 +192,38 @@ pub fn mark_internal_child(command: &mut std::process::Command) {
 }
 
 fn is_internal_child(system: &System, current: Pid) -> bool {
-    let Some(process) = system.process(current) else {
+    let expected = std::env::var(INTERNAL_PARENT).ok();
+    let process = system.process(current);
+    let parent = process
+        .and_then(Process::parent)
+        .and_then(|pid| system.process(pid));
+    let (Some(process), Some(parent)) = (process, parent) else {
+        if expected.is_some() {
+            log::warn!(
+                "internal daemon check failed: own process found={} parent pid={:?} found={}",
+                process.is_some(),
+                process.and_then(Process::parent),
+                parent.is_some()
+            );
+        }
         return false;
     };
-    let Some(parent) = process.parent().and_then(|pid| system.process(pid)) else {
-        return false;
-    };
-    std::env::var(INTERNAL_PARENT).ok().as_deref() == Some(&parent.pid().to_string())
+    let verified = expected.as_deref() == Some(&parent.pid().to_string())
         && parent.exe().is_some()
         && parent.exe() == process.exe()
         && parent.user_id().is_some()
-        && parent.user_id() == process.user_id()
+        && parent.user_id() == process.user_id();
+    if expected.is_some() && !verified {
+        log::warn!(
+            "internal daemon check failed: expected parent {expected:?}, actual {}; exe {:?} vs parent {:?}; user {:?} vs parent {:?}",
+            parent.pid(),
+            process.exe(),
+            parent.exe(),
+            process.user_id(),
+            parent.user_id()
+        );
+    }
+    verified
 }
 
 pub fn confirm(gui: bool, force: bool, details: &str) -> Result<bool, StartupError> {
