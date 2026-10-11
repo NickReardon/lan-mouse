@@ -451,6 +451,53 @@ port = 4242
 
 Where `left` can be either `left`, `right`, `top` or `bottom`.
 
+### Clipboard sharing (Windows and macOS)
+
+Plain text can be shared when control switches between computers. Copy text,
+move control to the other computer, and paste using its normal shortcut or menu.
+When returning control (including with the release bind), the controller fetches
+the remote clipboard. Transfers run in the background; a paste made immediately
+after switching can still see the previous clipboard until the transfer finishes.
+
+This is opt-in on **both computers**. Add the following as top-level tables in
+each `config.toml`, outside any `[[clients]]` entry:
+
+```toml
+[clipboard]
+mode = "on-switch" # "off" is the default
+
+[clipboard.peers]
+# On computers that control a configured client, pin that client's certificate.
+# Use its exact configured hostname, or its IP address if no hostname is used.
+"macbook.local" = "<Mac's full certificate fingerprint>"
+```
+
+Use the certificate fingerprint displayed by Lan Mouse on the destination.
+The destination must also authorize the controller's certificate through the
+existing authorization dialog or `[authorized_fingerprints]`. A computer that
+only receives control needs `[clipboard] mode = "on-switch"` and the controller's
+authorization; it does not need an outgoing clipboard peer entry. If both
+computers have outgoing clients configured, pin the corresponding destination
+on each computer. Changes reload with the configuration file.
+
+Clipboard transfers use a separate, mutually authenticated TLS 1.3 connection on
+the same **TCP port number** as the UDP input listener (4242 by default). Allow
+that TCP port through the destination's firewall. Missing or mismatched pins
+skip clipboard sharing and are reported in the daemon log. Older peers retain
+input sharing but cannot exchange clipboards. Clipboard authentication is
+independent of the existing input connection's authentication.
+
+Only plain text up to **1 MiB of UTF-8** is transferred. Images, files, formatting,
+and empty/non-text clipboards do not clear the destination's existing clipboard.
+New local clipboard changes during a received transfer take precedence, and
+superseded switch tasks are cancelled. Transfers time out after five seconds;
+there is no automatic reconciliation on reconnect and no clipboard history.
+Continuous synchronization and a remote-paste hotkey are not implemented yet.
+Clipboard contents are never logged. Enabling this feature allows authorized
+peers to read and replace the clipboard through the clipboard channel.
+
+Implementation is tracked in [fork issue #1](https://github.com/NickReardon/lan-mouse/issues/1).
+
 ## Roadmap
 - [x] Graphical frontend (gtk + libadwaita)
 - [x] respect xdg-config-home for config file location.

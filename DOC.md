@@ -51,6 +51,71 @@ sequenceDiagram
     Bob-->>-Alice: Ack (Keyboard Layout)
 ```
 
+## Clipboard protocol v1
+
+Windows and macOS support opt-in text synchronization on control switches.
+The service starts a separate TLS-over-TCP listener on the input listener's port
+number when `[clipboard] mode = "on-switch"`. TLS 1.3 requires a client certificate
+from `authorized_fingerprints`; outgoing requests pin the destination's complete
+certificate fingerprint from `clipboard.peers`. Handshake signatures are verified
+by rustls. ALPN is `lan-mouse-clipboard/1`. This channel does not depend on DTLS
+server-certificate verification and does not change the existing input protocol.
+
+After an input peer acknowledges entry, the controller sends a fresh clipboard
+snapshot. On release, it requests the remote clipboard. Neither operation
+intercepts paste shortcuts. GTK does not need to be open. A dedicated OS worker
+serializes clipboard access and performs bounded read retries on contention;
+network tasks remain independent of input capture and emulation.
+
+Each TCP connection carries one request. Integers use network byte order:
+
+| Field | Encoding |
+|---|---|
+| Protocol/version | Eight bytes: `LMCLIP01` |
+| Operation | One byte: 1 = push, 2 = pull |
+| Sender session | 16 random bytes, generated per clipboard service instance |
+| Sequence | Monotonically increasing u64 within the session |
+| Text (push body / pull response) | u32 byte length followed by UTF-8; `0xffffffff` means absent |
+| Push response | One byte: 1 = applied, 0 = skipped |
+
+Receivers reject unsupported versions/operations, malformed UTF-8, truncated
+frames, and lengths above 1 MiB before allocating a payload buffer. Empty text
+is a valid frame; an OS clipboard without text uses the absent marker. Requests
+have a five-second timeout, at most eight inbound tasks, and a bounded worker
+queue. Request ordering tracks at most 128 peer identities and 64 retired
+sessions per identity. Lower/duplicate sequences and retired sessions are
+rejected; a newer request supersedes an older push still receiving its payload.
+
+A local switch epoch invalidates queued writes from cancelled work. Native
+clipboard generations (Windows sequence number / macOS pasteboard change count)
+prevent a received transfer from overwriting a local copy made while that
+transfer was being received. Check and write are adjacent OS operations, not an
+atomic compare-and-swap. Since transfers are asynchronous, immediate paste is
+not delayed until synchronization completes. Protocol changes must introduce a
+new version and ALPN identifier. Clipboard contents must not appear in logs.
+
+### Manual clipboard verification
+
+Run a Windows/macOS pair with clipboard sharing enabled and fingerprints pinned.
+Test both Windows-controlled-Mac and Mac-controlled-Windows configurations:
+
+1. Copy ASCII, multiline text, Unicode, and emoji; switch and paste through both
+   keyboard shortcuts and application menus.
+2. Copy new text on the controlled computer; return by screen edge and release
+   bind and verify the controller receives it.
+3. Repeat switches rapidly, copy locally during a transfer, disconnect, disable
+   sharing in the config, and reconnect. Verify obsolete work does not replace
+   newer clipboard changes and input remains responsive.
+4. Try images, files, an empty clipboard, and text above 1 MiB. Verify unsupported
+   content leaves the destination untouched and errors contain no clipboard text.
+5. Try an unauthorized controller, a wrong destination pin, and an older peer.
+   Clipboard transfer must fail without leaking contents or preventing ordinary
+   input sharing. Verify held modifiers release normally on disconnect.
+
+Automated tests use in-memory clipboards and real TLS handshakes, leaving the
+developer's system clipboard untouched. Native clipboard and cross-platform
+behavior still require the manual checks above.
+
 ## Problems
 The general Idea is to have a bidirectional connection by default, meaning
 any connected device can not only receive events but also send events back.

@@ -62,6 +62,7 @@ fn default_path() -> Result<PathBuf, VarError> {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 struct ConfigToml {
+    clipboard: Option<crate::clipboard::Settings>,
     capture_backend: Option<CaptureBackend>,
     emulation_backend: Option<EmulationBackend>,
     port: Option<u16>,
@@ -345,6 +346,13 @@ const DEFAULT_RELEASE_KEYS: [scancode::Linux; 4] =
     [KeyLeftCtrl, KeyLeftShift, KeyLeftMeta, KeyLeftAlt];
 
 impl Config {
+    pub(crate) fn clipboard(&self) -> crate::clipboard::Settings {
+        self.config_toml
+            .as_ref()
+            .and_then(|c| c.clipboard.clone())
+            .unwrap_or_default()
+    }
+
     pub fn new() -> Result<Self, ConfigError> {
         let args = Args::parse();
 

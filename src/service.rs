@@ -1,6 +1,7 @@
 use crate::{
     capture::{Capture, CaptureType, ICaptureEvent},
     client::ClientManager,
+    clipboard::{Clipboard, Mode as ClipboardMode},
     config::{Config, ConfigClient},
     connect::LanMouseConnection,
     crypto,
@@ -36,6 +37,8 @@ pub enum ServiceError {
 }
 
 pub struct Service {
+    clipboard: Option<Clipboard>,
+    clipboard_client: Option<ClientHandle>,
     /// configuration
     config: Config,
     /// input capture
@@ -91,6 +94,20 @@ impl Service {
         let frontend_listener = AsyncFrontendListener::new().await?;
 
         let authorized_keys = Arc::new(RwLock::new(config.authorized_fingerprints()));
+        let clipboard = match Clipboard::new(
+            config.clipboard(),
+            config.port(),
+            cert.clone(),
+            authorized_keys.clone(),
+        )
+        .await
+        {
+            Ok(clipboard) => clipboard,
+            Err(error) => {
+                log::warn!("clipboard sharing unavailable: {error}");
+                None
+            }
+        };
         // listener + connection
         let listener =
             LanMouseListener::new(config.port(), cert.clone(), authorized_keys.clone()).await?;
@@ -107,6 +124,8 @@ impl Service {
 
         let port = config.port();
         let service = Self {
+            clipboard,
+            clipboard_client: None,
             config,
             capture,
             emulation,
@@ -144,15 +163,18 @@ impl Service {
             tokio::select! {
                 request = self.frontend_listener.next() => self.handle_frontend_request(request),
                 _ = self.frontend_event_pending.notified() => self.handle_frontend_pending().await,
-                event = self.emulation.event() => self.handle_emulation_event(event),
+                event = self.emulation.event() => self.handle_emulation_event(event).await,
                 event = self.capture.event() => self.handle_capture_event(event),
                 event = self.resolver.event() => self.handle_resolver_event(event),
-                _ = self.config.changed() => self.handle_config_change(),
+                _ = self.config.changed() => self.handle_config_change().await,
                 r = signal::ctrl_c() => break r.expect("failed to wait for CTRL+C"),
             }
         }
 
         log::info!("terminating service ...");
+        if let Some(clipboard) = self.clipboard.take() {
+            clipboard.terminate().await;
+        }
         log::debug!("terminating capture ...");
         self.capture.terminate().await;
         log::debug!("terminating emulation ...");
@@ -243,7 +265,7 @@ impl Service {
         }
     }
 
-    fn handle_config_change(&mut self) {
+    async fn handle_config_change(&mut self) {
         for h in self.client_manager.registered_clients() {
             self.remove_client(h);
         }
@@ -264,6 +286,7 @@ impl Service {
             .write()
             .unwrap()
             .clone_from(&authorized_keys);
+        self.restart_clipboard().await;
         self.sync_frontend();
     }
 
@@ -273,7 +296,7 @@ impl Service {
         }
     }
 
-    fn handle_emulation_event(&mut self, event: EmulationEvent) {
+    async fn handle_emulation_event(&mut self, event: EmulationEvent) {
         match event {
             EmulationEvent::ConnectionAttempt { fingerprint } => {
                 self.notify_frontend(FrontendEvent::ConnectionAttempt { fingerprint });
@@ -303,6 +326,7 @@ impl Service {
             EmulationEvent::PortChanged(port) => match port {
                 Ok(port) => {
                     self.port = port;
+                    self.restart_clipboard().await;
                     self.notify_frontend(FrontendEvent::PortChanged(port, None));
                 }
                 Err(e) => self
@@ -316,7 +340,13 @@ impl Service {
                 self.emulation_status = Status::Enabled;
                 self.notify_frontend(FrontendEvent::EmulationStatus(self.emulation_status));
             }
-            EmulationEvent::ReleaseNotify => self.capture.release(),
+            EmulationEvent::ReleaseNotify => {
+                self.clipboard_client = None;
+                if let Some(clipboard) = &mut self.clipboard {
+                    clipboard.cancel();
+                }
+                self.capture.release();
+            }
             EmulationEvent::Connected { addr, fingerprint } => {
                 self.notify_frontend(FrontendEvent::DeviceConnected { addr, fingerprint });
             }
@@ -336,14 +366,25 @@ impl Service {
 
     fn handle_capture_event(&mut self, event: ICaptureEvent) {
         match event {
+            ICaptureEvent::ClientReady(handle) => {
+                self.clipboard_client = Some(handle);
+                self.share_clipboard(handle, false);
+            }
             ICaptureEvent::CaptureBegin(handle) => {
                 // we entered the capture zone for an incoming connection
                 // => notify it that its capture should be released
                 if let Some(incoming) = self.incoming_conn_info.get(&handle) {
                     self.emulation.send_leave_event(incoming.addr);
+                    if let Some(clipboard) = &mut self.clipboard {
+                        clipboard.cancel();
+                    }
                 }
             }
             ICaptureEvent::CaptureDisabled => {
+                self.clipboard_client = None;
+                if let Some(clipboard) = &mut self.clipboard {
+                    clipboard.cancel();
+                }
                 self.capture_status = Status::Disabled;
                 self.notify_frontend(FrontendEvent::CaptureStatus(self.capture_status));
             }
@@ -352,13 +393,53 @@ impl Service {
                 self.notify_frontend(FrontendEvent::CaptureStatus(self.capture_status));
             }
             ICaptureEvent::ClientEntered(handle) => {
+                self.clipboard_client = None;
+                if let Some(clipboard) = &mut self.clipboard {
+                    clipboard.cancel();
+                }
                 log::info!("entering client {handle} ...");
                 self.spawn_hook_command(handle, HookKind::Enter);
             }
             ICaptureEvent::ClientLeft(handle) => {
+                if self.clipboard_client == Some(handle) {
+                    self.clipboard_client = None;
+                    self.share_clipboard(handle, true);
+                }
                 log::info!("leaving client {handle} ...");
                 self.spawn_hook_command(handle, HookKind::Leave);
             }
+        }
+    }
+
+    fn share_clipboard(&mut self, handle: ClientHandle, returning: bool) {
+        if let (Some(clipboard), Some((config, state))) =
+            (&mut self.clipboard, self.client_manager.get_state(handle))
+        {
+            clipboard.on_switch(&config, &state, returning);
+        }
+    }
+
+    async fn restart_clipboard(&mut self) {
+        self.clipboard_client = None;
+        if let Some(clipboard) = self.clipboard.take() {
+            clipboard.terminate().await;
+        }
+        if self.config.clipboard().mode == ClipboardMode::Off {
+            return;
+        }
+        match crypto::load_certificate(self.config.cert_path()) {
+            Ok(cert) => match Clipboard::new(
+                self.config.clipboard(),
+                self.port,
+                cert,
+                self.authorized_keys.clone(),
+            )
+            .await
+            {
+                Ok(clipboard) => self.clipboard = clipboard,
+                Err(error) => log::warn!("clipboard sharing unavailable: {error}"),
+            },
+            Err(error) => log::warn!("failed to reload clipboard identity: {error}"),
         }
     }
 
