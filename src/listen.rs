@@ -253,7 +253,11 @@ async fn read_loop(
 ) -> Result<(), Error> {
     let mut b = [0u8; MAX_EVENT_SIZE];
 
-    while conn.recv(&mut b).await.is_ok() {
+    loop {
+        b.fill(0);
+        if conn.recv(&mut b).await.is_err() {
+            break;
+        }
         match b.try_into() {
             Ok(event) => dtls_tx
                 .send(ListenEvent::Msg { event, addr })

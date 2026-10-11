@@ -54,6 +54,16 @@ impl EventThread {
         self.signal(RequestType::Release);
     }
 
+    pub(crate) fn release_at(
+        &self,
+        pos: Position,
+        fraction: u16,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), super::CaptureError>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.client_update(ClientUpdate::ReleaseAt(pos, fraction, tx));
+        rx
+    }
+
     pub(crate) fn create(&self, pos: Position) {
         self.client_update(ClientUpdate::Create(pos));
     }
@@ -94,6 +104,11 @@ enum RequestType {
 }
 
 enum ClientUpdate {
+    ReleaseAt(
+        Position,
+        u16,
+        tokio::sync::oneshot::Sender<Result<(), super::CaptureError>>,
+    ),
     Create(Position),
     Destroy(Position),
 }
@@ -299,7 +314,23 @@ fn check_client_activation(wparam: WPARAM, lparam: LPARAM) -> bool {
     /* notify main thread */
     log::debug!("ENTERED @ {prev_pos:?} -> {curr_pos:?}");
     let active = ACTIVE_CLIENT.get().expect("active client");
-    blocking_send_event(active, CaptureEvent::Begin);
+    let fraction = DISPLAYS.with_borrow(|(displays, _)| {
+        let displays = display_util::rects(displays);
+        input_event::edge::bounds(&displays).map(|b| {
+            input_event::edge::fraction(
+                b,
+                active.edge(),
+                f64::from(entry_point.0),
+                f64::from(entry_point.1),
+            )
+        })
+    });
+    blocking_send_event(
+        active,
+        fraction
+            .map(CaptureEvent::BeginAt)
+            .unwrap_or(CaptureEvent::Begin),
+    );
 
     ret
 }
@@ -420,6 +451,28 @@ fn enumerate_displays(display_rects: &mut Vec<RECT>) {
 
 fn update_clients(request: ClientUpdate) {
     match request {
+        ClientUpdate::ReleaseAt(pos, fraction, done) => {
+            ACTIVE_CLIENT.take();
+            let point = DISPLAYS.with_borrow_mut(|(displays, generation)| {
+                update_display_regions(displays, generation);
+                input_event::edge::entry(&display_util::rects(displays), pos.edge(), fraction)
+            });
+            let result = if let Some((x, y)) = point {
+                PREV_POS.replace(Some((x.round() as i32, y.round() as i32)));
+                unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::SetCursorPos(
+                        x.round() as i32,
+                        y.round() as i32,
+                    )
+                }
+                .map_err(|e| super::CaptureError::Io(std::io::Error::other(e.to_string())))
+            } else {
+                Err(super::CaptureError::Io(std::io::Error::other(
+                    "no desktop display for cursor entry",
+                )))
+            };
+            let _ = done.send(result);
+        }
         ClientUpdate::Create(pos) => {
             CLIENTS.with_borrow_mut(|clients| clients.insert(pos));
         }

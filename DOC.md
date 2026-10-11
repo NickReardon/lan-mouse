@@ -75,3 +75,36 @@ This ensures that
 - b) As soon as a virtual input enters another client, lan-mouse will stop receiving events,
 which ensures clients can only be controlled directly and not indirectly through other clients.
 
+
+
+## Relative edge position (Windows and macOS)
+
+Crossings preserve the cursor's relative position along the edge, including
+return crossings from an incoming connection. Leaving the right edge 10% from
+the bottom enters the left edge 10% from the bottom. Top/bottom transitions
+preserve relative width. Resolution and desktop origin can differ.
+
+Each device uses the bounding extent of its whole desktop, in its native cursor
+coordinate system (Windows desktop coordinates; macOS logical coordinates).
+The coordinate is measured from the top or left and quantized to a u16. Entry
+is inset from the edge to prevent an immediate return crossing. For irregular
+multi-monitor layouts, a fraction falling into a gap selects the nearest real
+segment of the destination's outer edge. Exact corner positions are inset too.
+
+The input protocol crate is version 0.4.0. Enter and Leave retain their original
+wire prefix and optionally append a presence byte (1) and a network-order u16
+coordinate. Receive buffers are zeroed before each datagram so old packets have
+no coordinate. Legacy peers ignore the extra bytes and retain their previous
+cursor behavior; both peers need the new build for proportional transitions.
+Linux backends retain their existing behavior in this first implementation.
+The original entry coordinate is retained through Enter retransmissions, and
+receivers position only once per capture session.
+
+Manual verification (not yet performed): on a Windows/macOS pair, test both
+control directions and all four edges at 10%, 50%, and 90%; move along the remote
+edge before returning and verify the return uses the new fraction. Repeat with
+different resolutions, scaling settings, negative monitor origins, monitor
+reconfiguration, and gaps. Verify continued movement after handoff retries,
+legacy-peer operation, and that held keys release on disconnect/release bind.
+
+Tracked in [fork issue #17](https://github.com/NickReardon/lan-mouse/issues/17).

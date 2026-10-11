@@ -34,6 +34,13 @@ impl Capture for WindowsInputCapture {
         Ok(())
     }
 
+    async fn release_at(&mut self, pos: Position, fraction: u16) -> Result<(), CaptureError> {
+        self.event_thread
+            .release_at(pos, fraction)
+            .await
+            .map_err(|_| CaptureError::ActivationClosed)?
+    }
+
     async fn terminate(&mut self) -> Result<(), CaptureError> {
         Ok(())
     }
