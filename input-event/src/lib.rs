@@ -1,5 +1,6 @@
 use std::fmt::{self, Display};
 
+pub mod edge;
 pub mod error;
 pub mod scancode;
 

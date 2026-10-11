@@ -88,73 +88,20 @@ so successful packages remain available even if another platform fails. Artifact
 downloads require signing in to GitHub; extract the artifact download first,
 then extract the app ZIP inside it.
 
-### Building a branch locally
+### Testing a branch locally
 
-Build an existing branch checkout without switching the current checkout:
-
-```powershell
-.\scripts\branch-build.cmd build codex/edge-position
-# Create a missing checkout under the base repository's .worktrees/:
-.\scripts\branch-build.cmd build codex/edge-position -CreateWorktree
-```
-
-The Windows `.cmd` launcher works from Command Prompt and PowerShell. It runs
-the PowerShell helper with an execution-policy bypass limited to that child
-process; it does not change your saved user or machine execution policy.
-The `.ps1` entry point remains available when your policy permits scripts.
+With Rust and the platform's GTK development dependencies installed (see
+[Dependencies & Compiling from Source](#dependencies--compiling-from-source)), switch to the branch and run it:
 
 ```sh
-bash scripts/branch-build.sh build codex/edge-position
-bash scripts/branch-build.sh build codex/edge-position --create-worktree
+git fetch origin
+git switch codex/edge-position
+cargo run
 ```
 
-This runs `cargo build --locked -p lan-mouse` in the selected checkout, including
-its uncommitted changes. A missing worktree is created only with the explicit
-flag. If the branch is not local, the helper fetches it from origin and creates
-a tracking branch. Both `codex/edge-position` and `origin/codex/edge-position`
-select that branch. A nonexistent branch or failed fetch stops the command.
-Rust and the platform's GTK development dependencies are
-required. Windows detects the standard `C:\gtk-build\gtk\x64\release` installation
-or uses `PKG_CONFIG`/pkg-config from the environment.
-
-The helper can be called from the base repo or any linked worktree; it finds
-the requested branch through Git without switching branches or changing your
-current directory. Cargo's target directory is the **base repository's** ignored
-`builds/<branch-with-slashes-replaced-by-hyphens>/` folder, including all dependency
-caches and intermediate files. Newly created worktrees use the same flat naming
-under `.worktrees/`; existing checkouts are reused at their current paths.
-For `codex/edge-position`, a normal debug build produces
-`builds/codex-edge-position/debug/lan-mouse.exe` on Windows, or `lan-mouse` on
-macOS/Linux. No output is copied into worktrees. Windows builds copy the GTK
-runtime DLLs beside the executable so it can be launched directly without
-setting PATH. macOS/Linux builds use installed runtime libraries.
-The scripts print the source checkout, commit, and output folder;
-they do not launch the result automatically. A branch marker prevents different
-branch names that flatten to the same folder from sharing build artifacts.
-
-### Testing a branch with packaged builds
-
-Install [GitHub CLI](https://cli.github.com) and run `gh auth login` first.
-The target branch must include the manual Release workflow trigger.
-
-```powershell
-# Windows: request a build, then download and launch after it completes.
-.\scripts\branch-build.cmd -Branch codex/edge-position -Build
-.\scripts\branch-build.cmd -Branch codex/edge-position -Launch
-```
-
-```sh
-# macOS or Linux (macOS also requires unzip).
-bash scripts/branch-build.sh codex/edge-position --build
-bash scripts/branch-build.sh codex/edge-position --launch
-```
-
-The scripts reuse successful builds of the current remote commit, print the
-commit and run URL, and download into a unique folder under Downloads.
-Quit other Lan Mouse instances before launching. Use `-RunId ID` on Windows
-or `--run-id ID` on macOS/Linux to test the same completed run across machines.
-Manual build artifacts expire after one day. These commands do not switch
-your local branch and require no local Rust or GTK development tools.
+All branches share the repository's `target/` directory, so switching branches
+only rebuilds what changed. On Windows, `C:\gtk-build\gtk\x64\release\bin` must
+be on `PATH` for both building and running.
 
 <details>
     <summary>Arch Linux</summary>
@@ -289,11 +236,9 @@ For a detailed list of available features, checkout the [Cargo.toml](./Cargo.tom
 
 ## Development
 
-For agent collaboration, start with [AGENTS.md](AGENTS.md) and
-[CONTRIBUTING.md](CONTRIBUTING.md). Work is planned and approved in focused
-issues before claiming or branching, then implemented in isolated `.worktrees/`
-checkouts with frequent commits, pushes, and a draft PR. Claude Code reads the
-same policy through [CLAUDE.md](CLAUDE.md).
+Work happens on ordinary branches in a single checkout: switch branches, then
+`cargo build` or `cargo run` to test. Agent instructions live in
+[AGENTS.md](AGENTS.md); Claude Code reads them through [CLAUDE.md](CLAUDE.md).
 
 ### Git pre-commit hook
 

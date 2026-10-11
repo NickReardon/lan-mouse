@@ -146,7 +146,7 @@ impl Service {
             tokio::select! {
                 request = self.frontend_listener.next() => self.handle_frontend_request(request),
                 _ = self.frontend_event_pending.notified() => self.handle_frontend_pending().await,
-                event = self.emulation.event() => self.handle_emulation_event(event),
+                event = self.emulation.event() => self.handle_emulation_event(event).await,
                 event = self.capture.event() => self.handle_capture_event(event),
                 event = self.resolver.event() => self.handle_resolver_event(event),
                 _ = self.config.changed() => self.handle_config_change(),
@@ -297,7 +297,7 @@ impl Service {
         }
     }
 
-    fn handle_emulation_event(&mut self, event: EmulationEvent) {
+    async fn handle_emulation_event(&mut self, event: EmulationEvent) {
         match event {
             EmulationEvent::ConnectionAttempt { fingerprint } => {
                 self.notify_frontend(FrontendEvent::ConnectionAttempt { fingerprint });
@@ -305,8 +305,23 @@ impl Service {
             EmulationEvent::Entered {
                 addr,
                 pos,
+                fraction,
                 fingerprint,
             } => {
+                if let Some(fraction) = fraction {
+                    let edge = match pos {
+                        lan_mouse_ipc::Position::Left => input_capture::Position::Left,
+                        lan_mouse_ipc::Position::Right => input_capture::Position::Right,
+                        lan_mouse_ipc::Position::Top => input_capture::Position::Top,
+                        lan_mouse_ipc::Position::Bottom => input_capture::Position::Bottom,
+                    };
+                    if !self.capture.release_at(edge, fraction).await {
+                        log::warn!(
+                            "could not position cursor for incoming peer {addr}; continuing with existing position"
+                        );
+                    }
+                    self.emulation.entry_ready(addr);
+                }
                 // check if already registered
                 if !self.incoming_conns.contains(&addr) {
                     self.add_incoming(addr, pos, fingerprint.clone());
@@ -360,11 +375,11 @@ impl Service {
 
     fn handle_capture_event(&mut self, event: ICaptureEvent) {
         match event {
-            ICaptureEvent::CaptureBegin(handle) => {
+            ICaptureEvent::CaptureBegin(handle, fraction) => {
                 // we entered the capture zone for an incoming connection
                 // => notify it that its capture should be released
                 if let Some(incoming) = self.incoming_conn_info.get(&handle) {
-                    self.emulation.send_leave_event(incoming.addr);
+                    self.emulation.send_leave_event(incoming.addr, fraction);
                 }
             }
             ICaptureEvent::CaptureDisabled => {
