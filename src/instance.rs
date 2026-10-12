@@ -128,6 +128,14 @@ fn is_lan_mouse_binary(path: &Path) -> bool {
     }
 }
 
+/// Whether `process` is a separate process of `user` that could be another
+/// Lan Mouse instance. On Linux sysinfo also lists every thread as a
+/// process with the owning process's executable and user, so threads,
+/// including the current process's own, are skipped.
+fn is_other_process(process: &Process, current: Pid, user: &sysinfo::Uid) -> bool {
+    process.pid() != current && process.user_id() == Some(user) && process.thread_kind().is_none()
+}
+
 fn instances(system: &System, current: Pid) -> Result<Vec<Instance>, StartupError> {
     let user = system
         .process(current)
@@ -138,7 +146,7 @@ fn instances(system: &System, current: Pid) -> Result<Vec<Instance>, StartupErro
     let mut binaries = HashMap::new();
     let mut result = Vec::new();
     for process in system.processes().values() {
-        if process.pid() == current || process.user_id() != Some(user) {
+        if !is_other_process(process, current, user) {
             continue;
         }
         let Some(executable) = executable(process) else {
@@ -514,6 +522,35 @@ mod tests {
         instance.started = process.start_time();
         instance.executable = PathBuf::from("unrelated");
         assert!(!matches_identity(&instance, process));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn own_threads_are_not_other_instances() {
+        // keep a thread alive while the process list is refreshed
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let _ = stop_rx.recv();
+        });
+        let mut system = System::new();
+        refresh(&mut system);
+        let current = Pid::from_u32(std::process::id());
+        let process = system.process(current).unwrap();
+        let user = process.user_id().unwrap();
+        let threads = process
+            .tasks()
+            .expect("Linux lists tasks")
+            .iter()
+            .filter(|&&tid| tid != current)
+            .filter_map(|&tid| system.process(tid))
+            .collect::<Vec<_>>();
+        assert!(!threads.is_empty(), "the spawned thread is listed");
+        for thread in threads {
+            assert!(thread.thread_kind().is_some());
+            assert!(!is_other_process(thread, current, user));
+        }
+        drop(stop_tx);
+        thread.join().unwrap();
     }
 
     #[test]
