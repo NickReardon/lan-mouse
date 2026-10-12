@@ -34,6 +34,7 @@ impl ClientManager {
             pos: config_client.pos,
             cmd: config_client.enter_hook,
             leave_cmd: config_client.leave_hook,
+            fingerprint: config_client.fingerprint,
         };
         let state = ClientState {
             active: config_client.active,
@@ -241,6 +242,22 @@ impl ClientManager {
     pub(crate) fn set_leave_hook(&self, handle: ClientHandle, leave_hook: Option<String>) {
         if let Some((c, _s)) = self.clients.borrow_mut().get_mut(handle as usize) {
             c.leave_cmd = leave_hook;
+        }
+    }
+
+    /// set or clear the pinned certificate fingerprint of the client
+    /// returns true, if the pin changed
+    pub(crate) fn set_fingerprint(
+        &self,
+        handle: ClientHandle,
+        fingerprint: Option<String>,
+    ) -> bool {
+        match self.clients.borrow_mut().get_mut(handle as usize) {
+            Some((c, _)) if c.fingerprint != fingerprint => {
+                c.fingerprint = fingerprint;
+                true
+            }
+            _ => false,
         }
     }
 

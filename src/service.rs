@@ -242,6 +242,10 @@ impl Service {
                 self.update_leave_hook(handle, leave_hook)
             }
             FrontendRequest::SaveConfiguration => self.save_config(),
+            FrontendRequest::UpdateFingerprint(handle, fingerprint) => {
+                self.update_fingerprint(handle, fingerprint);
+                self.save_config();
+            }
         }
     }
 
@@ -257,6 +261,7 @@ impl Service {
                 active: s.active,
                 enter_hook: c.cmd,
                 leave_hook: c.leave_cmd,
+                fingerprint: c.fingerprint,
             })
             .collect();
         self.config.set_clients(clients);
@@ -622,6 +627,33 @@ impl Service {
 
     fn update_leave_hook(&mut self, handle: ClientHandle, leave_hook: Option<String>) {
         self.client_manager.set_leave_hook(handle, leave_hook);
+        self.broadcast_client(handle);
+    }
+
+    fn update_fingerprint(&mut self, handle: ClientHandle, fingerprint: Option<String>) {
+        // validate at the IPC boundary: a malformed pin would silently
+        // reject every connection to this client
+        let fingerprint = match fingerprint
+            .as_deref()
+            .map(lan_mouse_ipc::normalize_fingerprint)
+            .transpose()
+        {
+            Ok(fingerprint) => fingerprint,
+            Err(e) => {
+                log::warn!("client {handle}: {e}");
+                self.notify_frontend(FrontendEvent::Error(e.to_string()));
+                return;
+            }
+        };
+        if self
+            .client_manager
+            .set_fingerprint(handle, fingerprint.clone())
+        {
+            match &fingerprint {
+                Some(fp) => log::info!("client {handle}: pinned certificate fingerprint {fp}"),
+                None => log::info!("client {handle}: cleared pinned certificate fingerprint"),
+            }
+        }
         self.broadcast_client(handle);
     }
 
