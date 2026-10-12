@@ -29,6 +29,22 @@ Focus lies on performance, ease of use and a maintainable implementation that ca
 Lan Mouse encrypts all network traffic using the DTLS implementation provided by [WebRTC.rs](https://github.com/webrtc-rs/webrtc).
 There are currently no mitigations in place for timing side-channel attacks.
 
+Both ends of a connection are authenticated by the sha256 fingerprint of their
+self-signed certificate:
+
+- **Incoming:** a device may only send input to this computer if its fingerprint
+  has been authorized (see [Usage](#usage)).
+- **Outgoing:** each configured client remembers the fingerprint of the
+  certificate it expects. A client without one pins the certificate it sees on
+  its first successful connection (trust on first use). After that, a device
+  presenting any other certificate is refused, and the GUI shows a warning.
+
+A device gets a new certificate if its `lan-mouse.pem` is deleted. Clients that
+connect to it then refuse the connection until their pin is replaced: use the
+forget button in the client's "certificate" row, or
+`lan-mouse cli set-fingerprint <id> [sha256]`. Compare the new fingerprint with
+the one shown in the device's General section before trusting it.
+
 ## OS Support
 
 Most current desktop environments and operating systems are fully supported, this includes
@@ -390,6 +406,11 @@ It is of the form "aa:bb:cc:..."
 
 Authorized devices can be persisted using the configuration file (see [Configuration](#configuration)).
 
+The other direction is pinned automatically: the first time you connect to a
+device, its certificate fingerprint is saved to the client's "certificate" row
+(see [Encryption](#encryption)). The forget button clears the pin. If the client
+is connected, the pin is replaced on its next connection.
+
 On Windows and macOS, closing the window keeps Lan Mouse running in the
 notification area or menu bar. Use **Quit Lan Mouse** in the window menu or the
 tray/menu bar menu to exit.
@@ -507,6 +528,10 @@ hostname = "iridium"
 activate_on_startup = true
 # optional list of (known) ip addresses
 ips = ["192.168.178.156"]
+# optional sha256 fingerprint of the client's certificate. Connections to a
+# device presenting a different certificate are refused. If omitted, the
+# certificate seen on the first connection is pinned and saved here.
+fingerprint = "bc:05:ab:7a:a4:de:88:8c:2f:92:ac:bc:b8:49:b8:24:0d:44:b3:e6:a4:ef:d7:0b:6c:69:6d:77:53:0b:14:80"
 
 # define a client on the left side with IP address 192.168.178.189
 [[clients]]
