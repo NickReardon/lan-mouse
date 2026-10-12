@@ -189,6 +189,22 @@ impl Window {
                         ),
                     );
                     row.connect_closure(
+                        "request-fingerprint-clear",
+                        false,
+                        closure_local!(
+                            #[strong]
+                            window,
+                            move |row: ClientRow| {
+                                if let Some(client) = window.client_by_idx(row.index() as u32) {
+                                    window.request(FrontendRequest::UpdateFingerprint(
+                                        client.handle(),
+                                        None,
+                                    ));
+                                }
+                            }
+                        ),
+                    );
+                    row.connect_closure(
                         "request-delete",
                         false,
                         closure_local!(
@@ -343,6 +359,16 @@ impl Window {
         row.set_hostname(client.hostname);
         row.set_port(client.port);
         row.set_position(client.pos);
+        let pin_changed = self
+            .client_object_for_handle(handle)
+            .is_some_and(|c| c.fingerprint() != client.fingerprint);
+        if pin_changed {
+            // a rejection warning refers to the previous pin
+            if let Some(toast) = self.imp().identity_toasts.borrow_mut().remove(&handle) {
+                toast.dismiss();
+            }
+        }
+        row.set_fingerprint(client.fingerprint);
     }
 
     pub(super) fn update_client_state(&self, handle: ClientHandle, state: ClientState) {
@@ -472,12 +498,19 @@ impl Window {
         // first four bytes are enough to tell the two apart at a glance
         let short = |fp: &str| fp.chars().take(11).collect::<String>();
         let toast = adw::Toast::new(&format!(
-            "Connection to {name} refused: certificate {}… does not match pinned {}…",
-            short(received),
-            short(expected),
+            "Refused {name}: unexpected certificate {}…",
+            short(received)
         ));
-        // security warning: keep it until dismissed
+        // security warning: keep it until dismissed or the pin changes
         toast.set_timeout(0);
+        if let Some(previous) = self
+            .imp()
+            .identity_toasts
+            .borrow_mut()
+            .insert(handle, toast.clone())
+        {
+            previous.dismiss();
+        }
         self.add_toast(toast);
     }
 

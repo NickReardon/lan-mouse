@@ -30,6 +30,10 @@ pub struct ClientRow {
     pub delete_button: TemplateChild<gtk::Button>,
     #[template_child]
     pub dns_loading_indicator: TemplateChild<gtk::Spinner>,
+    #[template_child]
+    pub fingerprint_row: TemplateChild<ActionRow>,
+    #[template_child]
+    pub fingerprint_clear_button: TemplateChild<gtk::Button>,
     pub bindings: RefCell<Vec<Binding>>,
     hostname_change_handler: RefCell<Option<SignalHandlerId>>,
     port_change_handler: RefCell<Option<SignalHandlerId>>,
@@ -65,6 +69,14 @@ impl ObjectImpl for ClientRow {
             self,
             move |button| {
                 row.handle_client_delete(button);
+            }
+        ));
+        self.fingerprint_clear_button.connect_clicked(clone!(
+            #[weak(rename_to = row)]
+            self,
+            move |_| {
+                row.obj()
+                    .emit_by_name::<()>("request-fingerprint-clear", &[]);
             }
         ));
         let handler = self.hostname.connect_changed(clone!(
@@ -112,6 +124,7 @@ impl ObjectImpl for ClientRow {
                     .param_types([bool::static_type()])
                     .build(),
                 Signal::builder("request-delete").build(),
+                Signal::builder("request-fingerprint-clear").build(),
                 Signal::builder("request-dns").build(),
                 Signal::builder("request-hostname-change")
                     .param_types([String::static_type()])
@@ -212,6 +225,14 @@ impl ClientRow {
             .expect("client object")
             .set_active(active);
         self.enable_switch.unblock_signal(handler);
+    }
+
+    pub(super) fn set_fingerprint(&self, fingerprint: Option<String>) {
+        self.client_object
+            .borrow_mut()
+            .as_mut()
+            .expect("client object")
+            .set_property("fingerprint", fingerprint);
     }
 
     pub(super) fn set_dns_state(&self, resolved: bool) {

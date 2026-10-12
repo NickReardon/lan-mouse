@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 use adw::subclass::prelude::*;
 use adw::{ActionRow, PreferencesGroup, ToastOverlay, prelude::*};
@@ -6,7 +7,7 @@ use glib::subclass::InitializingObject;
 use gtk::glib::clone;
 use gtk::{Button, CompositeTemplate, Entry, Image, Label, ListBox, gdk, gio, glib};
 
-use lan_mouse_ipc::{DEFAULT_PORT, FrontendRequestWriter};
+use lan_mouse_ipc::{ClientHandle, DEFAULT_PORT, FrontendRequestWriter};
 
 use crate::authorization_window::AuthorizationWindow;
 
@@ -52,6 +53,8 @@ pub struct Window {
     pub capture_active: Cell<bool>,
     pub emulation_active: Cell<bool>,
     pub authorization_window: RefCell<Option<AuthorizationWindow>>,
+    /// persistent peer identity warnings, dismissed when the pin changes
+    pub identity_toasts: RefCell<HashMap<ClientHandle, adw::Toast>>,
 }
 
 #[glib::object_subclass]
