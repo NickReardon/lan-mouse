@@ -293,8 +293,6 @@ impl Stream for InputCapture {
     }
 }
 
-// async_trait marks its boxed futures #[must_use], which clippy flags as redundant.
-#[allow(clippy::double_must_use)]
 #[async_trait]
 trait Capture: Stream<Item = Result<(Position, CaptureEvent), CaptureError>> + Unpin {
     /// create a new client with the given id

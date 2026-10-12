@@ -26,7 +26,7 @@ tokio = { version = "1.32.0", features = [
     "time",
 ] }
 once_cell = "1.19.0"
-async-trait = "0.1.81"
+async-trait = "0.1.92"
 tokio-util = "0.7.11"
 
 
