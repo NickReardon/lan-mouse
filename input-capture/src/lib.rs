@@ -294,6 +294,7 @@ impl Stream for InputCapture {
 }
 
 // async_trait marks its boxed futures #[must_use], which clippy flags as redundant.
+// Fixed in async-trait 0.1.92. Remove this allow with the dependency refresh in #35.
 #[allow(clippy::double_must_use)]
 #[async_trait]
 trait Capture: Stream<Item = Result<(Position, CaptureEvent), CaptureError>> + Unpin {
