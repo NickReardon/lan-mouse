@@ -73,6 +73,9 @@ sysinfo = { version = "0.33.1", default-features = false, features = ["system"] 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.148"
 
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0.12"
+
 [features]
 default = [
     "gtk",
@@ -98,7 +101,6 @@ name = "Lan Mouse"
 icon = ["target/icon.icns", "lan-mouse-gtk/resources/de.feschber.LanMouse.svg"]
 identifier = "de.feschber.LanMouse"
 deb_depends = [ "libadwaita-1-0" ]
-resources = ["target/menubar-template.png"]
 
 [package.metadata.bundle.osx]
 info_plist_exts = ["build-aux/macos-lsui-element.plist"]
