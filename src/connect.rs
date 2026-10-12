@@ -1,15 +1,17 @@
 use crate::client::ClientManager;
 use crate::config::local_commit;
+use crate::crypto;
 use lan_mouse_ipc::{ClientHandle, DEFAULT_PORT};
 use lan_mouse_proto::{MAX_EVENT_SIZE, ProtoEvent};
 use local_channel::mpsc::{Receiver, Sender, channel};
+use rustls::pki_types::CertificateDer;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     io,
     net::SocketAddr,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, Mutex as SyncMutex},
     time::Duration,
 };
 use thiserror::Error;
@@ -39,14 +41,53 @@ pub(crate) enum LanMouseConnectionError {
     TargetEmulationDisabled,
     #[error("Connection timed out")]
     Timeout,
+    #[error(transparent)]
+    PeerIdentity(#[from] PeerIdentityError),
+}
+
+/// The peer presented a certificate that does not establish the
+/// identity expected for this client.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub(crate) enum PeerIdentityError {
+    #[error("peer presented certificate `{received}`, but `{expected}` is pinned for this client")]
+    Mismatch { expected: String, received: String },
+    #[error("peer presented {0} certificates, expected exactly one")]
+    CertificateCount(usize),
+}
+
+/// Check the certificates the peer presented during the handshake
+/// against the pinned fingerprint, if any. Returns the fingerprint of
+/// the peer's certificate.
+///
+/// The handshake has already verified the peer's key-exchange signature
+/// against this certificate, so a matching fingerprint proves the peer
+/// holds the pinned key. `insecure_skip_verify` only disables CA chain
+/// validation, which self-signed certificates cannot pass anyway.
+fn verify_peer(certs: &[Vec<u8>], expected: Option<&str>) -> Result<String, PeerIdentityError> {
+    let [cert] = certs else {
+        return Err(PeerIdentityError::CertificateCount(certs.len()));
+    };
+    let received = crypto::generate_fingerprint(cert);
+    match expected {
+        Some(expected) if expected != received => Err(PeerIdentityError::Mismatch {
+            expected: expected.to_string(),
+            received,
+        }),
+        _ => Ok(received),
+    }
 }
 
 const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// An established connection together with the fingerprint of the
+/// certificate the peer presented.
+type Connected = (Arc<dyn Conn + Sync + Send>, SocketAddr, String);
+
 async fn connect(
     addr: SocketAddr,
     cert: Certificate,
-) -> Result<(Arc<dyn Conn + Sync + Send>, SocketAddr), (SocketAddr, LanMouseConnectionError)> {
+    expected: Option<String>,
+) -> Result<Connected, (SocketAddr, LanMouseConnectionError)> {
     log::info!("connecting to {addr} ...");
     let conn = Arc::new(
         UdpSocket::bind("0.0.0.0:0")
@@ -54,36 +95,85 @@ async fn connect(
             .map_err(|e| (addr, e.into()))?,
     );
     conn.connect(addr).await.map_err(|e| (addr, e.into()))?;
+    // result of the peer certificate check, written by the handshake
+    let peer_check: Arc<SyncMutex<Option<Result<String, PeerIdentityError>>>> = Default::default();
+    let verify_peer_certificate = {
+        let peer_check = peer_check.clone();
+        Arc::new(move |certs: &[Vec<u8>], _: &[CertificateDer<'static>]| {
+            let result = verify_peer(certs, expected.as_deref());
+            let verified = result.is_ok();
+            peer_check.lock().expect("lock").replace(result);
+            if verified {
+                Ok(())
+            } else {
+                Err(webrtc_dtls::Error::ErrVerifyDataMismatch)
+            }
+        })
+    };
     let config = Config {
         certificates: vec![cert],
         server_name: "ignored".to_owned(),
         insecure_skip_verify: true,
+        verify_peer_certificate: Some(verify_peer_certificate),
         extended_master_secret: ExtendedMasterSecretType::Require,
         ..Default::default()
     };
     let timeout = tokio::time::sleep(DEFAULT_CONNECTION_TIMEOUT);
-    tokio::select! {
-        _ = timeout => Err((addr, LanMouseConnectionError::Timeout)),
-        result = DTLSConn::new(conn, config, true, None) => match result {
-            Ok(dtls_conn) => Ok((Arc::new(dtls_conn), addr)),
-            Err(e) => Err((addr, e.into())),
+    let result = tokio::select! {
+        _ = timeout => return Err((addr, LanMouseConnectionError::Timeout)),
+        result = DTLSConn::new(conn, config, true, None) => result,
+    };
+    let peer_check = peer_check.lock().expect("lock").take();
+    let dtls_conn = match result {
+        Ok(dtls_conn) => dtls_conn,
+        Err(e) => {
+            let e = match peer_check {
+                Some(Err(identity)) => identity.into(),
+                _ => e.into(),
+            };
+            return Err((addr, e));
+        }
+    };
+    match peer_check {
+        Some(Ok(fingerprint)) => Ok((Arc::new(dtls_conn), addr, fingerprint)),
+        // fail closed: the handshake completed without a certificate check
+        Some(Err(e)) => {
+            let _ = dtls_conn.close().await;
+            Err((addr, e.into()))
+        }
+        None => {
+            let _ = dtls_conn.close().await;
+            Err((addr, PeerIdentityError::CertificateCount(0).into()))
         }
     }
 }
 
+/// Connect to the first address that completes a handshake with the
+/// expected peer. If none does, a peer identity failure takes precedence
+/// over other errors so that it can be reported.
 async fn connect_any(
     addrs: &[SocketAddr],
     cert: Certificate,
-) -> Result<(Arc<dyn Conn + Send + Sync>, SocketAddr), LanMouseConnectionError> {
+    expected: Option<String>,
+) -> Result<Connected, LanMouseConnectionError> {
     let mut joinset = JoinSet::new();
     for &addr in addrs {
-        joinset.spawn_local(connect(addr, cert.clone()));
+        joinset.spawn_local(connect(addr, cert.clone(), expected.clone()));
     }
+    let mut identity_error = None;
     loop {
         match joinset.join_next().await {
-            None => return Err(LanMouseConnectionError::NotConnected),
+            None => {
+                return Err(identity_error
+                    .map(LanMouseConnectionError::PeerIdentity)
+                    .unwrap_or(LanMouseConnectionError::NotConnected));
+            }
             Some(r) => match r.expect("join error") {
                 Ok(conn) => return Ok(conn),
+                Err((a, LanMouseConnectionError::PeerIdentity(e))) => {
+                    log::warn!("rejected peer at {a}: {e}");
+                    identity_error.get_or_insert(e);
+                }
                 Err((a, e)) => {
                     log::warn!("failed to connect to {a}: `{e}`")
                 }
@@ -185,14 +275,34 @@ async fn connect_to_handle(
             .map(|a| SocketAddr::new(a, port))
             .collect::<Vec<_>>();
         log::info!("client ({handle}) connecting ... (ips: {addrs:?})");
-        let res = connect_any(&addrs, cert).await;
-        let (conn, addr) = match res {
+        let expected = client_manager.get_fingerprint(handle);
+        let res = connect_any(&addrs, cert, expected.clone()).await;
+        let (conn, addr, fingerprint) = match res {
             Ok(c) => c,
             Err(e) => {
                 connecting.lock().await.remove(&handle);
                 return Err(e);
             }
         };
+        // KNOWN LIMIT: trust on first use. An unpinned client accepts and
+        // pins whichever peer completes the first handshake, including the
+        // fastest of several addresses. Upgrade path: confirm before pinning.
+        if expected.is_none() && client_manager.pin_fingerprint(handle, &fingerprint) {
+            log::info!("client ({handle}) pinned certificate {fingerprint} on first use");
+        }
+        // the pin may have been changed while the handshake was in flight
+        if let Some(pinned) = client_manager
+            .get_fingerprint(handle)
+            .filter(|pinned| *pinned != fingerprint)
+        {
+            let _ = conn.close().await;
+            connecting.lock().await.remove(&handle);
+            return Err(PeerIdentityError::Mismatch {
+                expected: pinned,
+                received: fingerprint,
+            }
+            .into());
+        }
         log::info!("client ({handle}) connected @ {addr}");
         client_manager.set_active_addr(handle, Some(addr));
         conns.lock().await.insert(addr, conn.clone());
@@ -311,4 +421,111 @@ async fn disconnect(
     client_manager.set_peer_commit(handle, None);
     let active: Vec<SocketAddr> = conns.lock().await.keys().copied().collect();
     log::info!("active connections: {active:?}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use webrtc_dtls::{config::ClientAuthType::RequireAnyClientCert, listener::listen};
+    use webrtc_util::conn::Listener;
+
+    fn certificate() -> Certificate {
+        Certificate::generate_self_signed(["ignored".to_owned()]).expect("certificate")
+    }
+
+    /// Start a DTLS server on localhost that presents `cert` and accepts
+    /// any client certificate, mirroring the listener's handshake config.
+    async fn serve(cert: Certificate) -> SocketAddr {
+        let config = Config {
+            certificates: vec![cert],
+            extended_master_secret: ExtendedMasterSecretType::Require,
+            client_auth: RequireAnyClientCert,
+            ..Default::default()
+        };
+        let listener = listen("127.0.0.1:0", config).await.expect("listen");
+        let addr = listener.addr().await.expect("listener address");
+        tokio::spawn(async move {
+            let mut conns = Vec::new();
+            while let Ok((conn, _)) = listener.accept().await {
+                conns.push(conn);
+            }
+        });
+        addr
+    }
+
+    async fn connect_to(
+        server: &Certificate,
+        expected: Option<String>,
+    ) -> Result<String, LanMouseConnectionError> {
+        let addr = serve(server.clone()).await;
+        match connect(addr, certificate(), expected).await {
+            Ok((conn, _, fingerprint)) => {
+                let _ = conn.close().await;
+                Ok(fingerprint)
+            }
+            Err((_, e)) => Err(e),
+        }
+    }
+
+    #[tokio::test]
+    async fn unpinned_peer_is_accepted_and_identified() {
+        let server = certificate();
+        let fingerprint = connect_to(&server, None).await.expect("handshake");
+        assert_eq!(fingerprint, crypto::certificate_fingerprint(&server));
+    }
+
+    #[tokio::test]
+    async fn pinned_peer_is_accepted() {
+        let server = certificate();
+        let pinned = crypto::certificate_fingerprint(&server);
+        let fingerprint = connect_to(&server, Some(pinned.clone()))
+            .await
+            .expect("handshake");
+        assert_eq!(fingerprint, pinned);
+    }
+
+    #[tokio::test]
+    async fn untrusted_peer_is_rejected() {
+        let server = certificate();
+        let pinned = crypto::certificate_fingerprint(&certificate());
+        let err = connect_to(&server, Some(pinned.clone())).await.unwrap_err();
+        let LanMouseConnectionError::PeerIdentity(PeerIdentityError::Mismatch {
+            expected,
+            received,
+        }) = err
+        else {
+            panic!("expected an identity mismatch, got `{err}`");
+        };
+        assert_eq!(expected, pinned);
+        assert_eq!(received, crypto::certificate_fingerprint(&server));
+    }
+
+    #[tokio::test]
+    async fn changed_peer_certificate_is_rejected() {
+        let original = certificate();
+        let pinned = connect_to(&original, None).await.expect("first handshake");
+        // the peer regenerates its certificate, e.g. after lan-mouse.pem was deleted
+        let regenerated = certificate();
+        let err = connect_to(&regenerated, Some(pinned)).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LanMouseConnectionError::PeerIdentity(PeerIdentityError::Mismatch { .. })
+            ),
+            "expected an identity mismatch, got `{err}`"
+        );
+    }
+
+    #[test]
+    fn certificate_count_other_than_one_is_rejected() {
+        assert_eq!(
+            verify_peer(&[], None),
+            Err(PeerIdentityError::CertificateCount(0))
+        );
+        let cert = vec![0u8; 8];
+        assert_eq!(
+            verify_peer(&[cert.clone(), cert], None),
+            Err(PeerIdentityError::CertificateCount(2))
+        );
+    }
 }

@@ -245,6 +245,14 @@ impl ClientManager {
         }
     }
 
+    /// get the pinned certificate fingerprint of the client
+    pub(crate) fn get_fingerprint(&self, handle: ClientHandle) -> Option<String> {
+        self.clients
+            .borrow()
+            .get(handle as usize)
+            .and_then(|(c, _)| c.fingerprint.clone())
+    }
+
     /// set or clear the pinned certificate fingerprint of the client
     /// returns true, if the pin changed
     pub(crate) fn set_fingerprint(
@@ -255,6 +263,19 @@ impl ClientManager {
         match self.clients.borrow_mut().get_mut(handle as usize) {
             Some((c, _)) if c.fingerprint != fingerprint => {
                 c.fingerprint = fingerprint;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// pin the certificate fingerprint of the client unless a pin
+    /// already exists (trust on first use)
+    /// returns true, if the fingerprint was pinned
+    pub(crate) fn pin_fingerprint(&self, handle: ClientHandle, fingerprint: &str) -> bool {
+        match self.clients.borrow_mut().get_mut(handle as usize) {
+            Some((c, _)) if c.fingerprint.is_none() => {
+                c.fingerprint = Some(fingerprint.to_string());
                 true
             }
             _ => false,
