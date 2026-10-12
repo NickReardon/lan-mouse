@@ -106,8 +106,10 @@ identified by the sha256 fingerprint of it, written as lowercase,
 colon-separated hex (`lan_mouse_ipc::normalize_fingerprint` accepts other
 spellings and converts them).
 
-**Incoming** connections require a client certificate whose fingerprint is in
-`authorized_fingerprints` (`src/listen.rs`).
+**Incoming** connections require exactly one client certificate whose
+fingerprint is in `authorized_fingerprints` (`src/listen.rs`). The check runs
+before the peer is authorized, so any other certificate count is rejected
+without panicking.
 
 **Outgoing** connections compare the server certificate with the client's
 pinned `fingerprint` (`src/connect.rs`):
