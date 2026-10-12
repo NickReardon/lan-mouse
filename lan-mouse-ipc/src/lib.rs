@@ -262,6 +262,13 @@ pub enum FrontendEvent {
     IncomingDisconnected(SocketAddr),
     /// failed connection attempt (approval for fingerprint required)
     ConnectionAttempt { fingerprint: String },
+    /// an outgoing connection was refused because the peer presented a
+    /// certificate that does not match the client's pinned fingerprint
+    PeerIdentityRejected {
+        handle: ClientHandle,
+        expected: String,
+        received: String,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]

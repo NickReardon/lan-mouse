@@ -456,6 +456,31 @@ impl Window {
         self.add_toast(toast);
     }
 
+    /// Report an outgoing connection that was refused because the peer's
+    /// certificate does not match the client's pinned fingerprint.
+    pub(super) fn peer_identity_rejected(
+        &self,
+        handle: ClientHandle,
+        expected: &str,
+        received: &str,
+    ) {
+        let name = self
+            .client_object_for_handle(handle)
+            .and_then(|c| c.hostname())
+            .unwrap_or_else(|| format!("client {handle}"));
+        log::warn!("{name}: rejected certificate {received}, pinned {expected}");
+        // first four bytes are enough to tell the two apart at a glance
+        let short = |fp: &str| fp.chars().take(11).collect::<String>();
+        let toast = adw::Toast::new(&format!(
+            "Connection to {name} refused: certificate {}… does not match pinned {}…",
+            short(received),
+            short(expected),
+        ));
+        // security warning: keep it until dismissed
+        toast.set_timeout(0);
+        self.add_toast(toast);
+    }
+
     pub(super) fn add_toast(&self, toast: adw::Toast) {
         let toast_overlay = &self.imp().toast_overlay;
         toast_overlay.add_toast(toast);

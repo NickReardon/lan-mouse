@@ -253,6 +253,16 @@ impl ClientManager {
             .and_then(|(c, _)| c.fingerprint.clone())
     }
 
+    /// whether a connection established with `fingerprint` still satisfies
+    /// the client's pin; true if the client is unpinned
+    pub(crate) fn fingerprint_matches(&self, handle: ClientHandle, fingerprint: &str) -> bool {
+        self.clients
+            .borrow()
+            .get(handle as usize)
+            .and_then(|(c, _)| c.fingerprint.as_deref())
+            .is_none_or(|pinned| pinned == fingerprint)
+    }
+
     /// set or clear the pinned certificate fingerprint of the client
     /// returns true, if the pin changed
     pub(crate) fn set_fingerprint(

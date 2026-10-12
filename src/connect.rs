@@ -83,6 +83,29 @@ const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 /// certificate the peer presented.
 type Connected = (Arc<dyn Conn + Sync + Send>, SocketAddr, String);
 
+/// An open connection and the fingerprint of the peer certificate it
+/// was established with.
+#[derive(Clone)]
+struct PeerConn {
+    conn: Arc<dyn Conn + Send + Sync>,
+    fingerprint: String,
+}
+
+type Conns = Rc<Mutex<HashMap<SocketAddr, PeerConn>>>;
+
+/// Peer identity outcomes of outgoing connections, reported to the service.
+#[derive(Debug)]
+pub(crate) enum PeerIdentityEvent {
+    /// the client had no pin and now pins the certificate it connected with
+    Pinned(ClientHandle),
+    /// the peer's certificate does not match the client's pin
+    Rejected {
+        handle: ClientHandle,
+        expected: String,
+        received: String,
+    },
+}
+
 async fn connect(
     addr: SocketAddr,
     cert: Certificate,
@@ -185,15 +208,20 @@ async fn connect_any(
 pub(crate) struct LanMouseConnection {
     cert: Certificate,
     client_manager: ClientManager,
-    conns: Rc<Mutex<HashMap<SocketAddr, Arc<dyn Conn + Send + Sync>>>>,
+    conns: Conns,
     connecting: Rc<Mutex<HashSet<ClientHandle>>>,
     recv_rx: Receiver<(ClientHandle, ProtoEvent)>,
     recv_tx: Sender<(ClientHandle, ProtoEvent)>,
+    identity_tx: Sender<PeerIdentityEvent>,
     ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
 }
 
 impl LanMouseConnection {
-    pub(crate) fn new(cert: Certificate, client_manager: ClientManager) -> Self {
+    pub(crate) fn new(
+        cert: Certificate,
+        client_manager: ClientManager,
+        identity_tx: Sender<PeerIdentityEvent>,
+    ) -> Self {
         let (recv_tx, recv_rx) = channel();
         Self {
             cert,
@@ -202,6 +230,7 @@ impl LanMouseConnection {
             connecting: Default::default(),
             recv_rx,
             recv_tx,
+            identity_tx,
             ping_response: Default::default(),
         }
     }
@@ -218,11 +247,26 @@ impl LanMouseConnection {
         let (buf, len): ([u8; MAX_EVENT_SIZE], usize) = event.into();
         let buf = &buf[..len];
         if let Some(addr) = self.client_manager.active_addr(handle) {
-            let conn = {
+            let peer = {
                 let conns = self.conns.lock().await;
                 conns.get(&addr).cloned()
             };
-            if let Some(conn) = conn {
+            // the pin was changed while connected: drop the connection and
+            // reconnect below so the new pin is enforced by a handshake
+            let peer = match peer {
+                Some(peer)
+                    if !self
+                        .client_manager
+                        .fingerprint_matches(handle, &peer.fingerprint) =>
+                {
+                    log::info!("client {handle}: pinned certificate changed, reconnecting");
+                    let _ = peer.conn.close().await;
+                    disconnect(&self.client_manager, handle, addr, &self.conns).await;
+                    None
+                }
+                peer => peer,
+            };
+            if let Some(PeerConn { conn, .. }) = peer {
                 if !self.client_manager.alive(handle) {
                     return Err(LanMouseConnectionError::TargetEmulationDisabled);
                 }
@@ -243,7 +287,7 @@ impl LanMouseConnection {
         if !connecting.contains(&handle) {
             connecting.insert(handle);
             // connect in the background
-            spawn_local(connect_to_handle(
+            let connect = connect_to_handle(
                 self.client_manager.clone(),
                 self.cert.clone(),
                 handle,
@@ -251,21 +295,43 @@ impl LanMouseConnection {
                 self.connecting.clone(),
                 self.recv_tx.clone(),
                 self.ping_response.clone(),
-            ));
+            );
+            let identity_tx = self.identity_tx.clone();
+            spawn_local(async move {
+                let event = match connect.await {
+                    Ok(true) => Some(PeerIdentityEvent::Pinned(handle)),
+                    Err(LanMouseConnectionError::PeerIdentity(PeerIdentityError::Mismatch {
+                        expected,
+                        received,
+                    })) => Some(PeerIdentityEvent::Rejected {
+                        handle,
+                        expected,
+                        received,
+                    }),
+                    Ok(false) | Err(_) => None,
+                };
+                if let Some(event) = event {
+                    if identity_tx.send(event).is_err() {
+                        log::debug!("service gone, dropping peer identity event");
+                    }
+                }
+            });
         }
         Err(LanMouseConnectionError::NotConnected)
     }
 }
 
+/// Connect to the client and start its receive loop. Returns whether the
+/// client pinned the peer's certificate on first use.
 async fn connect_to_handle(
     client_manager: ClientManager,
     cert: Certificate,
     handle: ClientHandle,
-    conns: Rc<Mutex<HashMap<SocketAddr, Arc<dyn Conn + Send + Sync>>>>,
+    conns: Conns,
     connecting: Rc<Mutex<HashSet<ClientHandle>>>,
     tx: Sender<(ClientHandle, ProtoEvent)>,
     ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
-) -> Result<(), LanMouseConnectionError> {
+) -> Result<bool, LanMouseConnectionError> {
     log::info!("client {handle} connecting ...");
     // sending did not work, figure out active conn.
     if let Some(addrs) = client_manager.get_ips(handle) {
@@ -287,7 +353,9 @@ async fn connect_to_handle(
         // KNOWN LIMIT: trust on first use. An unpinned client accepts and
         // pins whichever peer completes the first handshake, including the
         // fastest of several addresses. Upgrade path: confirm before pinning.
-        if expected.is_none() && client_manager.pin_fingerprint(handle, &fingerprint) {
+        let pinned_on_first_use =
+            expected.is_none() && client_manager.pin_fingerprint(handle, &fingerprint);
+        if pinned_on_first_use {
             log::info!("client ({handle}) pinned certificate {fingerprint} on first use");
         }
         // the pin may have been changed while the handshake was in flight
@@ -305,7 +373,13 @@ async fn connect_to_handle(
         }
         log::info!("client ({handle}) connected @ {addr}");
         client_manager.set_active_addr(handle, Some(addr));
-        conns.lock().await.insert(addr, conn.clone());
+        conns.lock().await.insert(
+            addr,
+            PeerConn {
+                conn: conn.clone(),
+                fingerprint,
+            },
+        );
         connecting.lock().await.remove(&handle);
 
         // Best-effort version handshake. Send our commit hash once
@@ -334,7 +408,7 @@ async fn connect_to_handle(
             tx,
             ping_response.clone(),
         ));
-        return Ok(());
+        return Ok(pinned_on_first_use);
     }
     connecting.lock().await.remove(&handle);
     Err(LanMouseConnectionError::NotConnected)
@@ -373,7 +447,7 @@ async fn receive_loop(
     handle: ClientHandle,
     addr: SocketAddr,
     conn: Arc<dyn Conn + Send + Sync>,
-    conns: Rc<Mutex<HashMap<SocketAddr, Arc<dyn Conn + Send + Sync>>>>,
+    conns: Conns,
     tx: Sender<(ClientHandle, ProtoEvent)>,
     ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
 ) {
@@ -413,7 +487,7 @@ async fn disconnect(
     client_manager: &ClientManager,
     handle: ClientHandle,
     addr: SocketAddr,
-    conns: &Mutex<HashMap<SocketAddr, Arc<dyn Conn + Send + Sync>>>,
+    conns: &Mutex<HashMap<SocketAddr, PeerConn>>,
 ) {
     log::warn!("client ({handle}) @ {addr} connection closed");
     conns.lock().await.remove(&addr);
@@ -514,6 +588,57 @@ mod tests {
             ),
             "expected an identity mismatch, got `{err}`"
         );
+    }
+
+    #[tokio::test]
+    async fn pin_is_reported_and_enforced_on_existing_connection() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let server = certificate();
+                let addr = serve(server.clone()).await;
+                let client_manager = ClientManager::default();
+                let handle = client_manager.add_client();
+                client_manager.set_fix_ips(handle, vec![addr.ip()]);
+                client_manager.set_port(handle, addr.port());
+                let (identity_tx, mut identity_rx) = channel();
+                let conn =
+                    LanMouseConnection::new(certificate(), client_manager.clone(), identity_tx);
+                let next_event = async |rx: &mut Receiver<PeerIdentityEvent>| {
+                    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                        .await
+                        .expect("identity event")
+                        .expect("channel open")
+                };
+
+                // first contact pins the peer's certificate
+                assert!(conn.send(ProtoEvent::Ping, handle).await.is_err());
+                let event = next_event(&mut identity_rx).await;
+                assert!(matches!(event, PeerIdentityEvent::Pinned(h) if h == handle));
+                let server_fingerprint = crypto::certificate_fingerprint(&server);
+                assert_eq!(
+                    client_manager.get_fingerprint(handle).as_deref(),
+                    Some(server_fingerprint.as_str())
+                );
+
+                // pinning a different certificate drops the open connection
+                // and the reconnect is rejected
+                let other = crypto::certificate_fingerprint(&certificate());
+                client_manager.set_fingerprint(handle, Some(other.clone()));
+                assert!(conn.send(ProtoEvent::Ping, handle).await.is_err());
+                let PeerIdentityEvent::Rejected {
+                    handle: h,
+                    expected,
+                    received,
+                } = next_event(&mut identity_rx).await
+                else {
+                    panic!("expected a rejection");
+                };
+                assert_eq!(h, handle);
+                assert_eq!(expected, other);
+                assert_eq!(received, server_fingerprint);
+            })
+            .await;
     }
 
     #[test]

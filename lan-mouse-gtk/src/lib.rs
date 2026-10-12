@@ -397,6 +397,11 @@ fn build_ui(
                     FrontendEvent::ConnectionAttempt { fingerprint } => {
                         window.request_authorization(&fingerprint);
                     }
+                    FrontendEvent::PeerIdentityRejected {
+                        handle,
+                        expected,
+                        received,
+                    } => window.peer_identity_rejected(handle, &expected, &received),
                     FrontendEvent::DeviceConnected {
                         fingerprint: _,
                         addr,
