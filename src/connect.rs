@@ -1,7 +1,7 @@
-use crate::client::ClientManager;
+use crate::client::{ClientManager, ConnectTarget};
 use crate::config::local_commit;
 use crate::crypto;
-use lan_mouse_ipc::{ClientHandle, DEFAULT_PORT};
+use lan_mouse_ipc::ClientHandle;
 use lan_mouse_proto::{MAX_EVENT_SIZE, ProtoEvent};
 use local_channel::mpsc::{Receiver, Sender, channel};
 use rustls::pki_types::CertificateDer;
@@ -43,6 +43,8 @@ pub(crate) enum LanMouseConnectionError {
     Timeout,
     #[error(transparent)]
     PeerIdentity(#[from] PeerIdentityError),
+    #[error("client changed while connecting")]
+    TargetChanged,
 }
 
 /// The peer presented a certificate that does not establish the
@@ -321,6 +323,29 @@ impl LanMouseConnection {
     }
 }
 
+/// Apply a completed handshake to the client it was made for. Returns
+/// whether the peer's certificate was pinned on first use.
+fn accept_handshake(
+    client_manager: &ClientManager,
+    handle: ClientHandle,
+    target: &ConnectTarget,
+    fingerprint: &str,
+) -> Result<bool, LanMouseConnectionError> {
+    // the client may have been edited, or removed and its handle reused,
+    // while the handshake was in flight: never apply the result to it
+    if client_manager.connect_target(handle).as_ref() != Some(target) {
+        return Err(LanMouseConnectionError::TargetChanged);
+    }
+    // a pinned client was already verified during the handshake
+    if target.fingerprint.is_some() {
+        return Ok(false);
+    }
+    // KNOWN LIMIT: trust on first use. An unpinned client accepts and pins
+    // whichever peer completes the first handshake, including the fastest
+    // of several addresses. Upgrade path: confirm before pinning.
+    Ok(client_manager.pin_fingerprint(handle, fingerprint))
+}
+
 /// Connect to the client and start its receive loop. Returns whether the
 /// client pinned the peer's certificate on first use.
 async fn connect_to_handle(
@@ -334,15 +359,14 @@ async fn connect_to_handle(
 ) -> Result<bool, LanMouseConnectionError> {
     log::info!("client {handle} connecting ...");
     // sending did not work, figure out active conn.
-    if let Some(addrs) = client_manager.get_ips(handle) {
-        let port = client_manager.get_port(handle).unwrap_or(DEFAULT_PORT);
-        let addrs = addrs
-            .into_iter()
-            .map(|a| SocketAddr::new(a, port))
+    if let Some(target) = client_manager.connect_target(handle) {
+        let addrs = target
+            .ips
+            .iter()
+            .map(|&ip| SocketAddr::new(ip, target.port))
             .collect::<Vec<_>>();
         log::info!("client ({handle}) connecting ... (ips: {addrs:?})");
-        let expected = client_manager.get_fingerprint(handle);
-        let res = connect_any(&addrs, cert, expected.clone()).await;
+        let res = connect_any(&addrs, cert, target.fingerprint.clone()).await;
         let (conn, addr, fingerprint) = match res {
             Ok(c) => c,
             Err(e) => {
@@ -350,26 +374,17 @@ async fn connect_to_handle(
                 return Err(e);
             }
         };
-        // KNOWN LIMIT: trust on first use. An unpinned client accepts and
-        // pins whichever peer completes the first handshake, including the
-        // fastest of several addresses. Upgrade path: confirm before pinning.
         let pinned_on_first_use =
-            expected.is_none() && client_manager.pin_fingerprint(handle, &fingerprint);
+            match accept_handshake(&client_manager, handle, &target, &fingerprint) {
+                Ok(pinned) => pinned,
+                Err(e) => {
+                    let _ = conn.close().await;
+                    connecting.lock().await.remove(&handle);
+                    return Err(e);
+                }
+            };
         if pinned_on_first_use {
             log::info!("client ({handle}) pinned certificate {fingerprint} on first use");
-        }
-        // the pin may have been changed while the handshake was in flight
-        if let Some(pinned) = client_manager
-            .get_fingerprint(handle)
-            .filter(|pinned| *pinned != fingerprint)
-        {
-            let _ = conn.close().await;
-            connecting.lock().await.remove(&handle);
-            return Err(PeerIdentityError::Mismatch {
-                expected: pinned,
-                received: fingerprint,
-            }
-            .into());
         }
         log::info!("client ({handle}) connected @ {addr}");
         client_manager.set_active_addr(handle, Some(addr));
@@ -617,7 +632,10 @@ mod tests {
                 assert!(matches!(event, PeerIdentityEvent::Pinned(h) if h == handle));
                 let server_fingerprint = crypto::certificate_fingerprint(&server);
                 assert_eq!(
-                    client_manager.get_fingerprint(handle).as_deref(),
+                    client_manager
+                        .connect_target(handle)
+                        .and_then(|t| t.fingerprint)
+                        .as_deref(),
                     Some(server_fingerprint.as_str())
                 );
 
@@ -639,6 +657,79 @@ mod tests {
                 assert_eq!(received, server_fingerprint);
             })
             .await;
+    }
+
+    fn unpinned_client(client_manager: &ClientManager, port: u16) -> ClientHandle {
+        let handle = client_manager.add_client();
+        client_manager.set_fix_ips(handle, vec!["127.0.0.1".parse().expect("ip")]);
+        client_manager.set_port(handle, port);
+        handle
+    }
+
+    fn pin_of(client_manager: &ClientManager, handle: ClientHandle) -> Option<String> {
+        client_manager
+            .connect_target(handle)
+            .and_then(|target| target.fingerprint)
+    }
+
+    #[test]
+    fn handshake_result_pins_unchanged_client() {
+        let client_manager = ClientManager::default();
+        let handle = unpinned_client(&client_manager, 4242);
+        let target = client_manager.connect_target(handle).expect("client");
+        let fingerprint = crypto::certificate_fingerprint(&certificate());
+        assert!(matches!(
+            accept_handshake(&client_manager, handle, &target, &fingerprint),
+            Ok(true)
+        ));
+        assert_eq!(pin_of(&client_manager, handle), Some(fingerprint));
+    }
+
+    /// An edit made while a handshake is in flight; returns the handle the
+    /// handshake result would be applied to.
+    type InFlightChange = fn(&ClientManager, ClientHandle) -> ClientHandle;
+
+    #[test]
+    fn handshake_result_is_discarded_when_client_changed_in_flight() {
+        let fingerprint = crypto::certificate_fingerprint(&certificate());
+        let changes: [(&str, InFlightChange); 3] = [
+            ("hostname edited", |m, h| {
+                m.set_hostname(h, Some("other-host".into()));
+                h
+            }),
+            ("pin set", |m, h| {
+                let other = crypto::certificate_fingerprint(&certificate());
+                m.set_fingerprint(h, Some(other));
+                h
+            }),
+            ("removed and handle reused", |m, h| {
+                m.remove_client(h);
+                let reused = unpinned_client(m, 4343);
+                assert_eq!(reused, h, "slab reuses the freed handle");
+                reused
+            }),
+        ];
+        for (change, apply) in changes {
+            let client_manager = ClientManager::default();
+            let handle = unpinned_client(&client_manager, 4242);
+            let target = client_manager.connect_target(handle).expect("client");
+            let pin_before = {
+                let handle = apply(&client_manager, handle);
+                pin_of(&client_manager, handle)
+            };
+            assert!(
+                matches!(
+                    accept_handshake(&client_manager, handle, &target, &fingerprint),
+                    Err(LanMouseConnectionError::TargetChanged)
+                ),
+                "{change}: result must be discarded"
+            );
+            assert_eq!(
+                pin_of(&client_manager, handle),
+                pin_before,
+                "{change}: pin must be untouched"
+            );
+        }
     }
 
     #[test]

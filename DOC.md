@@ -132,6 +132,11 @@ pinned `fingerprint` (`src/connect.rs`):
   connection.
 - A new pin is saved to the config file. Pins are never replaced
   automatically. `FrontendRequest::UpdateFingerprint` sets or clears one.
+- A handshake result is applied only if the client's target (hostname,
+  addresses, port and pin) is unchanged when the handshake completes.
+  Otherwise the connection is closed and retried. This covers clients that
+  are edited, or removed with their handle reused by another client
+  (including by a config reload), while the handshake is in flight.
 - Each open connection keeps the fingerprint it was established with. If the
   pin changes to a different certificate while connected, the next send closes
   the connection and reconnects under the new pin. Clearing the pin keeps the

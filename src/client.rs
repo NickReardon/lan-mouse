@@ -11,6 +11,18 @@ use lan_mouse_ipc::{ClientConfig, ClientHandle, ClientState, Position};
 
 use crate::config::ConfigClient;
 
+/// Where and to whom an outgoing connection is made. A handshake result is
+/// only applied to a client whose target is unchanged when the handshake
+/// completes: in the meantime the client may have been edited, or removed
+/// and its handle reused by another client (including by a config reload).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConnectTarget {
+    pub(crate) hostname: Option<String>,
+    pub(crate) ips: HashSet<IpAddr>,
+    pub(crate) port: u16,
+    pub(crate) fingerprint: Option<String>,
+}
+
 #[derive(Clone, Default)]
 pub struct ClientManager {
     clients: Rc<RefCell<Slab<(ClientConfig, ClientState)>>>,
@@ -245,12 +257,17 @@ impl ClientManager {
         }
     }
 
-    /// get the pinned certificate fingerprint of the client
-    pub(crate) fn get_fingerprint(&self, handle: ClientHandle) -> Option<String> {
+    /// snapshot of what an outgoing connection to the client is made for
+    pub(crate) fn connect_target(&self, handle: ClientHandle) -> Option<ConnectTarget> {
         self.clients
             .borrow()
             .get(handle as usize)
-            .and_then(|(c, _)| c.fingerprint.clone())
+            .map(|(c, s)| ConnectTarget {
+                hostname: c.hostname.clone(),
+                ips: s.ips.clone(),
+                port: c.port,
+                fingerprint: c.fingerprint.clone(),
+            })
     }
 
     /// whether a connection established with `fingerprint` still satisfies
@@ -365,19 +382,5 @@ impl ClientManager {
             .get(handle as usize)
             .map(|(_, s)| s.alive)
             .unwrap_or(false)
-    }
-
-    pub(crate) fn get_port(&self, handle: ClientHandle) -> Option<u16> {
-        self.clients
-            .borrow()
-            .get(handle as usize)
-            .map(|(c, _)| c.port)
-    }
-
-    pub(crate) fn get_ips(&self, handle: ClientHandle) -> Option<HashSet<IpAddr>> {
-        self.clients
-            .borrow()
-            .get(handle as usize)
-            .map(|(_, s)| s.ips.clone())
     }
 }
