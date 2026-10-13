@@ -99,6 +99,54 @@ which ensures clients can only be controlled directly and not indirectly through
 
 
 
+## Peer authentication
+
+Every device has a self-signed certificate (`lan-mouse.pem`) and is
+identified by the sha256 fingerprint of it, written as lowercase,
+colon-separated hex (`lan_mouse_ipc::normalize_fingerprint` accepts other
+spellings and converts them).
+
+**Incoming** connections require exactly one client certificate whose
+fingerprint is in `authorized_fingerprints` (`src/listen.rs`). The check runs
+before the peer is authorized, so any other certificate count is rejected
+without panicking.
+
+**Outgoing** connections compare the server certificate with the client's
+pinned `fingerprint` (`src/connect.rs`):
+
+- `insecure_skip_verify` stays set because self-signed certificates cannot pass
+  CA chain validation. webrtc-dtls still verifies the server's key-exchange
+  signature against the presented certificate and then calls
+  `verify_peer_certificate`, so a fingerprint match proves the peer holds the
+  pinned key.
+- Exactly one certificate must be presented. A handshake that completes
+  without the check running is closed.
+- An unpinned client pins the certificate of its first successful handshake
+  (trust on first use). This is a known limit: whoever answers first, on any
+  of the client's addresses, is trusted. Confirming before pinning would close
+  it.
+- A mismatch fails the handshake with `PeerIdentityError::Mismatch`. The
+  connection layer reports it to the service as a `PeerIdentityEvent`, which
+  becomes `FrontendEvent::PeerIdentityRejected`. Repeats for the same
+  certificate are suppressed for 30 seconds, because each crossing retries the
+  connection.
+- A new pin is saved to the config file. Pins are never replaced
+  automatically. `FrontendRequest::UpdateFingerprint` sets or clears one.
+- A handshake result is applied only if the client's target (hostname,
+  addresses, port and pin) is unchanged when the handshake completes.
+  Otherwise the connection is closed and retried. This covers clients that
+  are edited, or removed with their handle reused by another client
+  (including by a config reload), while the handshake is in flight.
+- Each open connection keeps the fingerprint it was established with. If the
+  pin changes to a different certificate while connected, the next send closes
+  the connection and reconnects under the new pin. Clearing the pin keeps the
+  open connection, and the next connection pins again.
+- An invalid fingerprint in the config file is kept as written and logged. It
+  can never match, so the client fails closed instead of being re-pinned.
+
+The two trust lists are separate: a device used in both directions appears in
+`authorized_fingerprints` and as a client pin.
+
 ## Relative edge position (Windows and macOS)
 
 Crossings preserve the cursor's relative position along the edge, including

@@ -114,6 +114,31 @@ impl ClientRow {
             .sync_create()
             .build();
 
+        // bind pinned fingerprint to the certificate row
+        let fingerprint_binding = client_object
+            .bind_property("fingerprint", &self.imp().fingerprint_row.get(), "subtitle")
+            .transform_to(|_, v: Option<String>| {
+                Some(match v {
+                    // the row renders markup and an invalid pin from the
+                    // config file is shown verbatim
+                    Some(fingerprint) => glib::markup_escape_text(&fingerprint).to_string(),
+                    None => "not pinned, the next connection pins the certificate it sees".into(),
+                })
+            })
+            .sync_create()
+            .build();
+
+        // only a pinned certificate can be forgotten
+        let fingerprint_clear_binding = client_object
+            .bind_property(
+                "fingerprint",
+                &self.imp().fingerprint_clear_button.get(),
+                "sensitive",
+            )
+            .transform_to(|_, v: Option<String>| Some(v.is_some()))
+            .sync_create()
+            .build();
+
         bindings.push(active_binding);
         bindings.push(switch_position_binding);
         bindings.push(hostname_binding);
@@ -123,6 +148,8 @@ impl ClientRow {
         bindings.push(position_binding);
         bindings.push(resolve_binding);
         bindings.push(ip_binding);
+        bindings.push(fingerprint_binding);
+        bindings.push(fingerprint_clear_binding);
 
         // Render the initial collapsed subtitle from whatever
         // peer_commit the ClientObject was created with. Subsequent
@@ -151,6 +178,10 @@ impl ClientRow {
 
     pub fn set_position(&self, pos: Position) {
         self.imp().set_pos(pos);
+    }
+
+    pub fn set_fingerprint(&self, fingerprint: Option<String>) {
+        self.imp().set_fingerprint(fingerprint);
     }
 
     pub fn set_dns_state(&self, resolved: bool) {

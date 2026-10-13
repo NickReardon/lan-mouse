@@ -189,6 +189,22 @@ impl Window {
                         ),
                     );
                     row.connect_closure(
+                        "request-fingerprint-clear",
+                        false,
+                        closure_local!(
+                            #[strong]
+                            window,
+                            move |row: ClientRow| {
+                                if let Some(client) = window.client_by_idx(row.index() as u32) {
+                                    window.request(FrontendRequest::UpdateFingerprint(
+                                        client.handle(),
+                                        None,
+                                    ));
+                                }
+                            }
+                        ),
+                    );
+                    row.connect_closure(
                         "request-delete",
                         false,
                         closure_local!(
@@ -343,6 +359,16 @@ impl Window {
         row.set_hostname(client.hostname);
         row.set_port(client.port);
         row.set_position(client.pos);
+        let pin_changed = self
+            .client_object_for_handle(handle)
+            .is_some_and(|c| c.fingerprint() != client.fingerprint);
+        if pin_changed {
+            // a rejection warning refers to the previous pin
+            if let Some(toast) = self.imp().identity_toasts.borrow_mut().remove(&handle) {
+                toast.dismiss();
+            }
+        }
+        row.set_fingerprint(client.fingerprint);
     }
 
     pub(super) fn update_client_state(&self, handle: ClientHandle, state: ClientState) {
@@ -453,6 +479,38 @@ impl Window {
 
     pub(super) fn show_toast(&self, msg: &str) {
         let toast = adw::Toast::new(msg);
+        self.add_toast(toast);
+    }
+
+    /// Report an outgoing connection that was refused because the peer's
+    /// certificate does not match the client's pinned fingerprint.
+    pub(super) fn peer_identity_rejected(
+        &self,
+        handle: ClientHandle,
+        expected: &str,
+        received: &str,
+    ) {
+        let name = self
+            .client_object_for_handle(handle)
+            .and_then(|c| c.hostname())
+            .unwrap_or_else(|| format!("client {handle}"));
+        log::warn!("{name}: rejected certificate {received}, pinned {expected}");
+        // first four bytes are enough to tell the two apart at a glance
+        let short = |fp: &str| fp.chars().take(11).collect::<String>();
+        let toast = adw::Toast::new(&format!(
+            "Refused {name}: unexpected certificate {}…",
+            short(received)
+        ));
+        // security warning: keep it until dismissed or the pin changes
+        toast.set_timeout(0);
+        if let Some(previous) = self
+            .imp()
+            .identity_toasts
+            .borrow_mut()
+            .insert(handle, toast.clone())
+        {
+            previous.dismiss();
+        }
         self.add_toast(toast);
     }
 

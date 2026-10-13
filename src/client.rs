@@ -11,6 +11,18 @@ use lan_mouse_ipc::{ClientConfig, ClientHandle, ClientState, Position};
 
 use crate::config::ConfigClient;
 
+/// Where and to whom an outgoing connection is made. A handshake result is
+/// only applied to a client whose target is unchanged when the handshake
+/// completes: in the meantime the client may have been edited, or removed
+/// and its handle reused by another client (including by a config reload).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConnectTarget {
+    pub(crate) hostname: Option<String>,
+    pub(crate) ips: HashSet<IpAddr>,
+    pub(crate) port: u16,
+    pub(crate) fingerprint: Option<String>,
+}
+
 #[derive(Clone, Default)]
 pub struct ClientManager {
     clients: Rc<RefCell<Slab<(ClientConfig, ClientState)>>>,
@@ -34,6 +46,7 @@ impl ClientManager {
             pos: config_client.pos,
             cmd: config_client.enter_hook,
             leave_cmd: config_client.leave_hook,
+            fingerprint: config_client.fingerprint,
         };
         let state = ClientState {
             active: config_client.active,
@@ -244,6 +257,58 @@ impl ClientManager {
         }
     }
 
+    /// snapshot of what an outgoing connection to the client is made for
+    pub(crate) fn connect_target(&self, handle: ClientHandle) -> Option<ConnectTarget> {
+        self.clients
+            .borrow()
+            .get(handle as usize)
+            .map(|(c, s)| ConnectTarget {
+                hostname: c.hostname.clone(),
+                ips: s.ips.clone(),
+                port: c.port,
+                fingerprint: c.fingerprint.clone(),
+            })
+    }
+
+    /// whether a connection established with `fingerprint` still satisfies
+    /// the client's pin; true if the client is unpinned
+    pub(crate) fn fingerprint_matches(&self, handle: ClientHandle, fingerprint: &str) -> bool {
+        self.clients
+            .borrow()
+            .get(handle as usize)
+            .and_then(|(c, _)| c.fingerprint.as_deref())
+            .is_none_or(|pinned| pinned == fingerprint)
+    }
+
+    /// set or clear the pinned certificate fingerprint of the client
+    /// returns true, if the pin changed
+    pub(crate) fn set_fingerprint(
+        &self,
+        handle: ClientHandle,
+        fingerprint: Option<String>,
+    ) -> bool {
+        match self.clients.borrow_mut().get_mut(handle as usize) {
+            Some((c, _)) if c.fingerprint != fingerprint => {
+                c.fingerprint = fingerprint;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// pin the certificate fingerprint of the client unless a pin
+    /// already exists (trust on first use)
+    /// returns true, if the fingerprint was pinned
+    pub(crate) fn pin_fingerprint(&self, handle: ClientHandle, fingerprint: &str) -> bool {
+        match self.clients.borrow_mut().get_mut(handle as usize) {
+            Some((c, _)) if c.fingerprint.is_none() => {
+                c.fingerprint = Some(fingerprint.to_string());
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// set resolving status of the client
     pub(crate) fn set_resolving(&self, handle: ClientHandle, status: bool) {
         if let Some((_, s)) = self.clients.borrow_mut().get_mut(handle as usize) {
@@ -317,19 +382,5 @@ impl ClientManager {
             .get(handle as usize)
             .map(|(_, s)| s.alive)
             .unwrap_or(false)
-    }
-
-    pub(crate) fn get_port(&self, handle: ClientHandle) -> Option<u16> {
-        self.clients
-            .borrow()
-            .get(handle as usize)
-            .map(|(c, _)| c.port)
-    }
-
-    pub(crate) fn get_ips(&self, handle: ClientHandle) -> Option<HashSet<IpAddr>> {
-        self.clients
-            .borrow()
-            .get(handle as usize)
-            .map(|(_, s)| s.ips.clone())
     }
 }
