@@ -53,10 +53,16 @@ impl AsyncFrontendListener {
                     // connected -> lan-mouse is already running
                     Ok(_) => return Err(IpcListenerCreationError::AlreadyRunning),
                     // lan-mouse is not running but a socket was left behind
-                    Err(e) => {
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            ErrorKind::ConnectionRefused | ErrorKind::NotFound
+                        ) =>
+                    {
                         log::debug!("{socket_path:?}: {e} - removing left behind socket");
                         let _ = std::fs::remove_file(&socket_path);
                     }
+                    Err(e) => return Err(IpcListenerCreationError::Bind(e)),
                 }
             }
             let listener = match UnixListener::bind(&socket_path) {
@@ -100,7 +106,7 @@ impl AsyncFrontendListener {
         // TODO do simultaneously
         for tx in self.tx_streams.iter_mut() {
             // write len + payload
-            if tx.write(json.as_bytes()).await.is_err() {
+            if tx.write_all(json.as_bytes()).await.is_err() {
                 keep.push(false);
                 continue;
             }

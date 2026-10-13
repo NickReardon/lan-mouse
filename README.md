@@ -29,6 +29,22 @@ Focus lies on performance, ease of use and a maintainable implementation that ca
 Lan Mouse encrypts all network traffic using the DTLS implementation provided by [WebRTC.rs](https://github.com/webrtc-rs/webrtc).
 There are currently no mitigations in place for timing side-channel attacks.
 
+Both ends of a connection are authenticated by the sha256 fingerprint of their
+self-signed certificate:
+
+- **Incoming:** a device may only send input to this computer if its fingerprint
+  has been authorized (see [Usage](#usage)).
+- **Outgoing:** each configured client remembers the fingerprint of the
+  certificate it expects. A client without one pins the certificate it sees on
+  its first successful connection (trust on first use). After that, a device
+  presenting any other certificate is refused, and the GUI shows a warning.
+
+A device gets a new certificate if its `lan-mouse.pem` is deleted. Clients that
+connect to it then refuse the connection until their pin is replaced: use the
+forget button in the client's "certificate" row, or
+`lan-mouse cli set-fingerprint <id> [sha256]`. Compare the new fingerprint with
+the one shown in the device's General section before trusting it.
+
 ## OS Support
 
 Most current desktop environments and operating systems are fully supported, this includes
@@ -75,10 +91,10 @@ On Windows, extract the entire ZIP and run `lan-mouse.exe` from the extracted
 folder so it can find the included DLLs. On macOS, extract `Lan Mouse.app` and
 follow the macOS launch and Accessibility permission instructions below.
 
-All GitHub build workflows run only when a version tag matching `v*` is pushed
-(for example, `v0.11.1`). Ordinary branch pushes, pull requests, and manual
-dispatches do not start GitHub builds. Build and test locally during development
-using the instructions below; keeping work local also means leaving it unpushed.
+Version tags matching `v*` (for example, `v0.11.1`) run the GitHub build
+workflows. Ordinary branch pushes and pull requests do not start builds.
+The Release workflow also accepts manual requests for branch test packages;
+manual runs upload artifacts without publishing a release.
 
 When ready to publish, tag the intended release commit and push that tag. The
 **Release** workflow builds the apps and publishes the downloads for that tag.
@@ -87,6 +103,21 @@ Each platform also uploads its package independently to the run under
 so successful packages remain available even if another platform fails. Artifact
 downloads require signing in to GitHub; extract the artifact download first,
 then extract the app ZIP inside it.
+
+### Testing a branch locally
+
+With Rust and the platform's GTK development dependencies installed (see
+[Dependencies & Compiling from Source](#dependencies--compiling-from-source)), switch to the branch and run it:
+
+```sh
+git fetch origin
+git switch codex/edge-position
+cargo run
+```
+
+All branches share the repository's `target/` directory, so switching branches
+only rebuilds what changed. On Windows, `C:\gtk-build\gtk\x64\release\bin` must
+be on `PATH` for both building and running.
 
 <details>
     <summary>Arch Linux</summary>
@@ -131,7 +162,7 @@ dnf install lan-mouse
 - Unzip it
 - Remove the quarantine with `xattr -rd com.apple.quarantine "Lan Mouse.app"`
 - Launch the app
-- Use the menu bar item to open the settings window or quit Lan Mouse. Bundled macOS builds run as a menu bar app and do not keep a Dock icon visible.
+- Use the menu bar item to open the settings window or quit Lan Mouse. Lan Mouse shows a Dock icon while its window is open; closing the window hides it and keeps sharing active from the menu bar.
 - Grant accessibility permissions in System Preferences
 
 </details>
@@ -144,6 +175,12 @@ Lan Mouse can be installed from the [winget community repositories](https://gith
 ```sh
 winget install lan-mouse
 ```
+
+Closing the window hides Lan Mouse to the notification area (system tray) and
+keeps sharing active. Click the tray icon, or choose **Open Lan Mouse** from its
+menu, to reopen the window. Choose **Quit Lan Mouse** from the tray menu or the
+window menu to exit and stop the sharing daemon the app started. If the tray
+icon cannot be created, closing the window quits Lan Mouse.
 
 </details>
 
@@ -221,6 +258,10 @@ For a detailed list of available features, checkout the [Cargo.toml](./Cargo.tom
 
 ## Development
 
+Work happens on ordinary branches in a single checkout: switch branches, then
+`cargo build` or `cargo run` to test. Agent instructions live in
+[AGENTS.md](AGENTS.md); Claude Code reads them through [CLAUDE.md](CLAUDE.md).
+
 ### Git pre-commit hook
 
 This repository includes a local git hooks directory `.githooks/` with a `pre-commit` script that enforces formatting, lints, and tests before allowing a commit.  It is optional to enable it, but it will prevent you from committing code with failing unit tests or that needs clippy/fmt fixes. To enable the hook locally:
@@ -238,6 +279,18 @@ git config core.hooksPath .githooks
 ```
 
 The `pre-commit` script runs `cargo fmt --all` (and fails if files were modified), `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and `cargo test --workspace --all-features`.
+
+### App icons
+
+The Windows icon (`build-aux/windows/lan-mouse.ico`, embedded in `lan-mouse.exe`
+and used by the tray) and the macOS Dock and menu bar images
+(`lan-mouse-gtk/resources/macos/`) are generated from
+`lan-mouse-gtk/resources/de.feschber.LanMouse.svg` and committed. After
+changing the SVG, regenerate them with `rsvg-convert` and Pillow installed:
+
+```sh
+python scripts/make-app-icons.py
+```
 
 ### Dependencies & Compiling from Source
 <details>
@@ -353,6 +406,15 @@ It is of the form "aa:bb:cc:..."
 
 Authorized devices can be persisted using the configuration file (see [Configuration](#configuration)).
 
+The other direction is pinned automatically: the first time you connect to a
+device, its certificate fingerprint is saved to the client's "certificate" row
+(see [Encryption](#encryption)). The forget button clears the pin. If the client
+is connected, the pin is replaced on its next connection.
+
+On Windows and macOS, closing the window keeps Lan Mouse running in the
+notification area or menu bar. Use **Quit Lan Mouse** in the window menu or the
+tray/menu bar menu to exit.
+
 If the device still can not be entered, make sure you have UDP port `4242` (or the one selected) opened up in your firewall.
 </details>
 
@@ -376,6 +438,36 @@ for information on how to use a specific command.
     <summary>Daemon Mode</summary>
 
 Lan Mouse can be launched in daemon mode to keep it running in the background (e.g. for use in a systemd-service).
+
+When launching another copy on Windows, macOS, or Linux, Lan Mouse checks for
+existing apps and daemons owned by your user. Choose **Close existing and start
+this version** to replace them with the executable you just launched, including
+its command-line configuration. Input sharing stops briefly during replacement.
+**Cancel** exits the new launch and leaves the existing session running.
+
+New builds shut down cooperatively and release held input. Older builds may need
+a second **Force close and start** confirmation, especially on Windows. Force
+closing can skip input cleanup. Lan Mouse verifies executable markers, process
+owner, path, PID, and start time before targeting a process; it never closes a
+process based only on its name or an occupied port. Processes that cannot be
+verified or accessed cause an error instead of being terminated. Keep the normal
+`lan-mouse` executable name so installed and test builds can be identified.
+
+Interactive `lan-mouse daemon` launches offer terminal confirmation. Unattended
+daemon launches report a conflict and exit with an error instead of waiting for
+input or replacing a running instance. `lan-mouse cli` continues controlling the
+running daemon, and capture/emulation test subcommands do not replace it.
+Concurrent launches are serialized during startup; retry if another launch is
+already in progress. On Linux the startup lock follows the per-user IPC runtime
+directory. If systemd or another supervisor restarts a daemon during replacement,
+Lan Mouse reports the conflict; stop or pause that service before retrying. It
+does not modify service-manager configuration or request elevated privileges.
+
+This check runs when an executable is actually launched. OS actions that only
+reactivate an existing application (for example, macOS Launch Services reopening
+an already running app) retain that OS behavior; launch the desired test build's
+executable to request replacement. Local IPC lifecycle support requires matching
+0.4 frontends/daemons; older builds use the process-based replacement fallback.
 
 To do so, use the `daemon` subcommand:
 
@@ -436,6 +528,10 @@ hostname = "iridium"
 activate_on_startup = true
 # optional list of (known) ip addresses
 ips = ["192.168.178.156"]
+# optional sha256 fingerprint of the client's certificate. Connections to a
+# device presenting a different certificate are refused. If omitted, the
+# certificate seen on the first connection is pinned and saved here.
+fingerprint = "bc:05:ab:7a:a4:de:88:8c:2f:92:ac:bc:b8:49:b8:24:0d:44:b3:e6:a4:ef:d7:0b:6c:69:6d:77:53:0b:14:80"
 
 # define a client on the left side with IP address 192.168.178.189
 [[clients]]

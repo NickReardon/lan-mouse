@@ -3,7 +3,7 @@ use crate::{
     client::ClientManager,
     clipboard::{Clipboard, Mode as ClipboardMode},
     config::{Config, ConfigClient},
-    connect::LanMouseConnection,
+    connect::{LanMouseConnection, PeerIdentityEvent},
     crypto,
     dns::{DnsEvent, DnsResolver},
     emulation::{Emulation, EmulationEvent},
@@ -14,12 +14,14 @@ use lan_mouse_ipc::{
     AsyncFrontendListener, ClientHandle, FrontendEvent, FrontendRequest, IpcError,
     IpcListenerCreationError, Position, Status,
 };
+use local_channel::mpsc::{Receiver, channel};
 use log;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     io,
     net::{IpAddr, SocketAddr},
     sync::{Arc, RwLock},
+    time::{Duration, Instant},
 };
 use thiserror::Error;
 use tokio::{process::Command, signal, sync::Notify};
@@ -70,7 +72,16 @@ pub struct Service {
     /// map from capture handle to connection info
     incoming_conn_info: HashMap<ClientHandle, Incoming>,
     next_trigger_handle: u64,
+    shutdown_requested: bool,
+    /// peer identity outcomes of outgoing connections
+    identity_rx: Receiver<PeerIdentityEvent>,
+    /// last reported identity rejection per client, to avoid repeating
+    /// the same report on every reconnect attempt
+    last_rejection: HashMap<ClientHandle, (String, Instant)>,
 }
+
+/// Minimum interval between repeated reports of the same rejected peer.
+const REJECTION_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 struct Incoming {
@@ -111,7 +122,8 @@ impl Service {
         // listener + connection
         let listener =
             LanMouseListener::new(config.port(), cert.clone(), authorized_keys.clone()).await?;
-        let conn = LanMouseConnection::new(cert.clone(), client_manager.clone());
+        let (identity_tx, identity_rx) = channel();
+        let conn = LanMouseConnection::new(cert.clone(), client_manager.clone(), identity_tx);
 
         // input capture + emulation
         let capture_backend = config.capture_backend().map(|b| b.into());
@@ -142,6 +154,9 @@ impl Service {
             incoming_conn_info: Default::default(),
             incoming_conns: Default::default(),
             next_trigger_handle: 0,
+            shutdown_requested: false,
+            identity_rx,
+            last_rejection: Default::default(),
         };
         Ok(service)
     }
@@ -166,12 +181,23 @@ impl Service {
                 event = self.emulation.event() => self.handle_emulation_event(event).await,
                 event = self.capture.event() => self.handle_capture_event(event),
                 event = self.resolver.event() => self.handle_resolver_event(event),
+                event = self.identity_rx.recv() => self.handle_identity_event(event.expect("channel closed")),
                 _ = self.config.changed() => self.handle_config_change().await,
                 r = signal::ctrl_c() => break r.expect("failed to wait for CTRL+C"),
+            }
+            if self.shutdown_requested {
+                break;
             }
         }
 
         log::info!("terminating service ...");
+        // Notify first so frontends do not treat EOF as a reason to restart.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            self.frontend_listener
+                .broadcast(FrontendEvent::ShuttingDown),
+        )
+        .await;
         if let Some(clipboard) = self.clipboard.take() {
             clipboard.terminate().await;
         }
@@ -191,6 +217,18 @@ impl Service {
             Err(e) => return log::error!("error receiving request: {e}"),
         };
         match request {
+            FrontendRequest::Identify => {
+                self.pending_frontend_events
+                    .push_back(FrontendEvent::InstanceInfo {
+                        pid: std::process::id(),
+                    });
+                self.frontend_event_pending.notify_one();
+            }
+            FrontendRequest::Shutdown { pid } => {
+                if pid == std::process::id() {
+                    self.shutdown_requested = true;
+                }
+            }
             FrontendRequest::Activate(handle, active) => {
                 self.set_client_active(handle, active);
                 self.save_config();
@@ -240,6 +278,10 @@ impl Service {
                 self.update_leave_hook(handle, leave_hook)
             }
             FrontendRequest::SaveConfiguration => self.save_config(),
+            FrontendRequest::UpdateFingerprint(handle, fingerprint) => {
+                self.update_fingerprint(handle, fingerprint);
+                self.save_config();
+            }
         }
     }
 
@@ -255,6 +297,7 @@ impl Service {
                 active: s.active,
                 enter_hook: c.cmd,
                 leave_hook: c.leave_cmd,
+                fingerprint: c.fingerprint,
             })
             .collect();
         self.config.set_clients(clients);
@@ -304,8 +347,23 @@ impl Service {
             EmulationEvent::Entered {
                 addr,
                 pos,
+                fraction,
                 fingerprint,
             } => {
+                if let Some(fraction) = fraction {
+                    let edge = match pos {
+                        lan_mouse_ipc::Position::Left => input_capture::Position::Left,
+                        lan_mouse_ipc::Position::Right => input_capture::Position::Right,
+                        lan_mouse_ipc::Position::Top => input_capture::Position::Top,
+                        lan_mouse_ipc::Position::Bottom => input_capture::Position::Bottom,
+                    };
+                    if !self.capture.release_at(edge, fraction).await {
+                        log::warn!(
+                            "could not position cursor for incoming peer {addr}; continuing with existing position"
+                        );
+                    }
+                    self.emulation.entry_ready(addr);
+                }
                 // check if already registered
                 if !self.incoming_conns.contains(&addr) {
                     self.add_incoming(addr, pos, fingerprint.clone());
@@ -370,11 +428,11 @@ impl Service {
                 self.clipboard_client = Some(handle);
                 self.share_clipboard(handle, false);
             }
-            ICaptureEvent::CaptureBegin(handle) => {
+            ICaptureEvent::CaptureBegin(handle, fraction) => {
                 // we entered the capture zone for an incoming connection
                 // => notify it that its capture should be released
                 if let Some(incoming) = self.incoming_conn_info.get(&handle) {
-                    self.emulation.send_leave_event(incoming.addr);
+                    self.emulation.send_leave_event(incoming.addr, fraction);
                     if let Some(clipboard) = &mut self.clipboard {
                         clipboard.cancel();
                     }
@@ -665,6 +723,66 @@ impl Service {
     fn update_leave_hook(&mut self, handle: ClientHandle, leave_hook: Option<String>) {
         self.client_manager.set_leave_hook(handle, leave_hook);
         self.broadcast_client(handle);
+    }
+
+    fn update_fingerprint(&mut self, handle: ClientHandle, fingerprint: Option<String>) {
+        // validate at the IPC boundary: a malformed pin would silently
+        // reject every connection to this client
+        let fingerprint = match fingerprint
+            .as_deref()
+            .map(lan_mouse_ipc::normalize_fingerprint)
+            .transpose()
+        {
+            Ok(fingerprint) => fingerprint,
+            Err(e) => {
+                log::warn!("client {handle}: {e}");
+                self.notify_frontend(FrontendEvent::Error(e.to_string()));
+                return;
+            }
+        };
+        if self
+            .client_manager
+            .set_fingerprint(handle, fingerprint.clone())
+        {
+            self.last_rejection.remove(&handle);
+            match &fingerprint {
+                Some(fp) => log::info!("client {handle}: pinned certificate fingerprint {fp}"),
+                None => log::info!("client {handle}: cleared pinned certificate fingerprint"),
+            }
+        }
+        self.broadcast_client(handle);
+    }
+
+    fn handle_identity_event(&mut self, event: PeerIdentityEvent) {
+        match event {
+            PeerIdentityEvent::Pinned(handle) => {
+                self.last_rejection.remove(&handle);
+                self.save_config();
+                self.broadcast_client(handle);
+            }
+            PeerIdentityEvent::Rejected {
+                handle,
+                expected,
+                received,
+            } => {
+                let repeated = self.last_rejection.get(&handle).is_some_and(|(fp, at)| {
+                    *fp == received && at.elapsed() < REJECTION_REPORT_INTERVAL
+                });
+                if repeated {
+                    return;
+                }
+                log::warn!(
+                    "client {handle}: rejected peer certificate {received}, pinned {expected}"
+                );
+                self.last_rejection
+                    .insert(handle, (received.clone(), Instant::now()));
+                self.notify_frontend(FrontendEvent::PeerIdentityRejected {
+                    handle,
+                    expected,
+                    received,
+                });
+            }
+        }
     }
 
     fn broadcast_client(&mut self, handle: ClientHandle) {

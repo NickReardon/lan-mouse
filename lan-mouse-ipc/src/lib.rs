@@ -20,7 +20,9 @@ mod connect;
 mod connect_async;
 mod listen;
 
-pub use connect::{FrontendEventReader, FrontendRequestWriter, connect, try_connect};
+pub use connect::{
+    FrontendEventReader, FrontendRequestWriter, connect, connect_verified, try_connect,
+};
 pub use connect_async::{AsyncFrontendEventReader, AsyncFrontendRequestWriter, connect_async};
 pub use listen::AsyncFrontendListener;
 
@@ -142,6 +144,10 @@ pub struct ClientConfig {
     pub cmd: Option<String>,
     /// leave hook
     pub leave_cmd: Option<String>,
+    /// pinned sha256 fingerprint of the client's certificate,
+    /// `None` until the first successful connection pins it
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 impl Default for ClientConfig {
@@ -153,8 +159,34 @@ impl Default for ClientConfig {
             pos: Default::default(),
             cmd: None,
             leave_cmd: None,
+            fingerprint: None,
         }
     }
+}
+
+/// Number of bytes in a sha256 certificate fingerprint.
+const FINGERPRINT_LEN: usize = 32;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("invalid certificate fingerprint `{0}`: expected 32 hex-encoded bytes (sha256)")]
+pub struct InvalidFingerprint(pub String);
+
+/// Normalize a sha256 certificate fingerprint to the canonical
+/// lowercase, colon-separated form used throughout Lan Mouse
+/// (`ab:cd:...`). Accepts upper- or lowercase hex with or without
+/// colon separators and surrounding whitespace.
+pub fn normalize_fingerprint(fingerprint: &str) -> Result<String, InvalidFingerprint> {
+    let invalid = || InvalidFingerprint(fingerprint.to_string());
+    let hex = fingerprint.trim().replace(':', "").to_ascii_lowercase();
+    if hex.len() != FINGERPRINT_LEN * 2 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(invalid());
+    }
+    let pairs = hex
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| std::str::from_utf8(pair).expect("ascii hex"))
+        .collect::<Vec<_>>();
+    Ok(pairs.join(":"))
 }
 
 pub type ClientHandle = u64;
@@ -189,6 +221,10 @@ pub struct ClientState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FrontendEvent {
+    /// Identifies the daemon for launch-time readiness and targeted shutdown.
+    InstanceInfo { pid: u32 },
+    /// The daemon is shutting down; frontends must quit without restarting it.
+    ShuttingDown,
     /// a client was created
     Created(ClientHandle, ClientConfig, ClientState),
     /// no such client
@@ -226,10 +262,21 @@ pub enum FrontendEvent {
     IncomingDisconnected(SocketAddr),
     /// failed connection attempt (approval for fingerprint required)
     ConnectionAttempt { fingerprint: String },
+    /// an outgoing connection was refused because the peer presented a
+    /// certificate that does not match the client's pinned fingerprint
+    PeerIdentityRejected {
+        handle: ClientHandle,
+        expected: String,
+        received: String,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum FrontendRequest {
+    /// Request the daemon's process identity (local IPC protocol 0.4).
+    Identify,
+    /// Gracefully stop this daemon and its frontends, only if the PID matches.
+    Shutdown { pid: u32 },
     /// activate/deactivate client
     Activate(ClientHandle, bool),
     /// add a new client
@@ -266,6 +313,8 @@ pub enum FrontendRequest {
     UpdateLeaveHook(u64, Option<String>),
     /// save config file
     SaveConfiguration,
+    /// set or clear the pinned certificate fingerprint of a client
+    UpdateFingerprint(ClientHandle, Option<String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -324,4 +373,37 @@ pub fn is_service_running() -> bool {
 #[cfg(windows)]
 pub fn is_service_running() -> bool {
     std::net::TcpStream::connect("127.0.0.1:5252").is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CANONICAL: &str = "00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff";
+
+    #[test]
+    fn normalize_accepts_canonical_form() {
+        assert_eq!(normalize_fingerprint(CANONICAL).as_deref(), Ok(CANONICAL));
+    }
+
+    #[test]
+    fn normalize_accepts_uppercase_without_separators() {
+        let input = format!("  {}\n", CANONICAL.replace(':', "").to_uppercase());
+        assert_eq!(normalize_fingerprint(&input).as_deref(), Ok(CANONICAL));
+    }
+
+    #[test]
+    fn normalize_rejects_wrong_length_and_non_hex() {
+        assert!(normalize_fingerprint("").is_err());
+        assert!(normalize_fingerprint(&CANONICAL[3..]).is_err());
+        assert!(normalize_fingerprint(&format!("{CANONICAL}:00")).is_err());
+        assert!(normalize_fingerprint(&CANONICAL.replace("ff", "fg")).is_err());
+    }
+
+    #[test]
+    fn client_config_without_fingerprint_deserializes() {
+        let json = r#"{"hostname":null,"fix_ips":[],"port":4242,"pos":"left","cmd":null,"leave_cmd":null}"#;
+        let config: ClientConfig = serde_json::from_str(json).expect("valid client config");
+        assert_eq!(config.fingerprint, None);
+    }
 }

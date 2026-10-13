@@ -69,6 +69,20 @@
 				</property>
 			</object>
 		</child>
+		<!-- pinned certificate -->
+		<child>
+			<object class="AdwActionRow" id="fingerprint_row">
+				<property name="title" translatable="yes">certificate</property>
+				<child>
+					<object class="GtkButton" id="fingerprint_clear_button">
+						<property name="icon-name">edit-clear-symbolic</property>
+						<property name="valign">center</property>
+						<property name="halign">center</property>
+						<property name="tooltip-text" translatable="yes">forget the pinned certificate; the next connection pins the certificate it sees</property>
+					</object>
+				</child>
+			</object>
+		</child>
 		<!-- delete button -->
 		<child>
 			<object class="AdwActionRow" id="delete_row">

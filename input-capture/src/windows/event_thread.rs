@@ -15,6 +15,9 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
+};
 use windows::core::{PCWSTR, w};
 
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -52,6 +55,16 @@ impl EventThread {
 
     pub(crate) fn release_capture(&self) {
         self.signal(RequestType::Release);
+    }
+
+    pub(crate) fn release_at(
+        &self,
+        pos: Position,
+        fraction: u16,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), super::CaptureError>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.client_update(ClientUpdate::ReleaseAt(pos, fraction, tx));
+        rx
     }
 
     pub(crate) fn create(&self, pos: Position) {
@@ -94,6 +107,11 @@ enum RequestType {
 }
 
 enum ClientUpdate {
+    ReleaseAt(
+        Position,
+        u16,
+        tokio::sync::oneshot::Sender<Result<(), super::CaptureError>>,
+    ),
     Create(Position),
     Destroy(Position),
 }
@@ -161,6 +179,19 @@ fn start_routine(
     request_buffer: Arc<Mutex<Vec<ClientUpdate>>>,
 ) {
     EVENT_TX.replace(Some(event_tx));
+
+    // Hook coordinates and display modes are physical pixels. Without this,
+    // SetCursorPos/GetCursorPos use scaled coordinates on high-DPI displays
+    // and edge entry lands at the wrong position.
+    if unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }
+        .0
+        .is_null()
+    {
+        log::warn!(
+            "could not enable per-monitor DPI awareness; edge entry may be misplaced on scaled displays"
+        );
+    }
+
     /* communicate thread id */
     {
         let (cnd, mtx) = &*ready;
@@ -299,7 +330,26 @@ fn check_client_activation(wparam: WPARAM, lparam: LPARAM) -> bool {
     /* notify main thread */
     log::debug!("ENTERED @ {prev_pos:?} -> {curr_pos:?}");
     let active = ACTIVE_CLIENT.get().expect("active client");
-    blocking_send_event(active, CaptureEvent::Begin);
+    let fraction = DISPLAYS.with_borrow(|(displays, _)| {
+        let displays = display_util::rects(displays);
+        input_event::edge::bounds(&displays).map(|b| {
+            let fraction = input_event::edge::fraction(
+                b,
+                active.edge(),
+                f64::from(entry_point.0),
+                f64::from(entry_point.1),
+            );
+            let percent = f64::from(fraction) * 100.0 / f64::from(u16::MAX);
+            log::info!("edge-position exit: backend=windows edge={active} position={percent:.3}% from top/left cursor={entry_point:?} previous={prev_pos:?} crossing={curr_pos:?} bounds={b:?}");
+            fraction
+        })
+    });
+    blocking_send_event(
+        active,
+        fraction
+            .map(CaptureEvent::BeginAt)
+            .unwrap_or(CaptureEvent::Begin),
+    );
 
     ret
 }
@@ -420,6 +470,72 @@ fn enumerate_displays(display_rects: &mut Vec<RECT>) {
 
 fn update_clients(request: ClientUpdate) {
     match request {
+        ClientUpdate::ReleaseAt(pos, fraction, done) => {
+            ACTIVE_CLIENT.take();
+            let (point, bounds) = DISPLAYS.with_borrow_mut(|(displays, generation)| {
+                update_display_regions(displays, generation);
+                let displays = display_util::rects(displays);
+                (
+                    input_event::edge::entry(&displays, pos.edge(), fraction),
+                    input_event::edge::bounds(&displays),
+                )
+            });
+            let result = if let Some((x, y)) = point {
+                let requested = f64::from(fraction) * 100.0 / f64::from(u16::MAX);
+                log::info!(
+                    "edge-position entry: backend=windows edge={pos} requested={requested:.3}% from top/left target=({x:.3}, {y:.3}) bounds={bounds:?}"
+                );
+                PREV_POS.replace(Some((x.round() as i32, y.round() as i32)));
+                let result = unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::SetCursorPos(
+                        x.round() as i32,
+                        y.round() as i32,
+                    )
+                }
+                .map_err(|e| super::CaptureError::Io(std::io::Error::other(e.to_string())));
+                if result.is_ok() {
+                    let mut actual = windows::Win32::Foundation::POINT::default();
+                    match unsafe {
+                        windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut actual)
+                    } {
+                        Ok(()) => {
+                            if let Some(bounds) = bounds {
+                                let mapped = f64::from(input_event::edge::fraction(
+                                    bounds,
+                                    pos.edge(),
+                                    x,
+                                    y,
+                                )) * 100.0
+                                    / f64::from(u16::MAX);
+                                let observed = f64::from(input_event::edge::fraction(
+                                    bounds,
+                                    pos.edge(),
+                                    f64::from(actual.x),
+                                    f64::from(actual.y),
+                                )) * 100.0
+                                    / f64::from(u16::MAX);
+                                log::info!(
+                                    "edge-position entry-readback: backend=windows edge={pos} requested={requested:.3}% mapped={mapped:.3}% actual={observed:.3}% from top/left cursor=({}, {}) delta=({:.3}, {:.3})",
+                                    actual.x,
+                                    actual.y,
+                                    f64::from(actual.x) - x,
+                                    f64::from(actual.y) - y
+                                );
+                            }
+                        }
+                        Err(error) => log::warn!(
+                            "edge-position entry-readback failed: backend=windows edge={pos}: {error}"
+                        ),
+                    }
+                }
+                result
+            } else {
+                Err(super::CaptureError::Io(std::io::Error::other(
+                    "no desktop display for cursor entry",
+                )))
+            };
+            let _ = done.send(result);
+        }
         ClientUpdate::Create(pos) => {
             CLIENTS.with_borrow_mut(|clients| clients.insert(pos));
         }

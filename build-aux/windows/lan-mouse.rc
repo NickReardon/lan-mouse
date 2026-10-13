@@ -1,0 +1,4 @@
+// Icon resource 1 is the first icon in the executable, which Windows uses for
+// Explorer and which GTK uses as the window class icon (taskbar, title bar).
+// The tray icon loads the same resource by this ordinal.
+1 ICON "lan-mouse.ico"

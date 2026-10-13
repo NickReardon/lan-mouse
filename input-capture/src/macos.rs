@@ -62,6 +62,7 @@ struct InputCaptureState {
 
 #[derive(Debug)]
 enum ProducerEvent {
+    ReleaseAt(Position, u16, oneshot::Sender<()>),
     Release,
     Create(Position),
     Destroy(Position),
@@ -105,6 +106,7 @@ impl InputCaptureState {
     fn update_bounds(&mut self) -> Result<(), MacosCaptureCreationError> {
         let active_ids =
             CGDisplay::active_displays().map_err(MacosCaptureCreationError::ActiveDisplays)?;
+        self.bounds = Bounds::default();
         active_ids.iter().for_each(|d| {
             let bounds = CGDisplay::new(*d).bounds();
             self.bounds.xmin = self.bounds.xmin.min(bounds.origin.x);
@@ -153,6 +155,63 @@ impl InputCaptureState {
     ) -> Result<(), CaptureError> {
         log::debug!("handling event: {producer_event:?}");
         match producer_event {
+            ProducerEvent::ReleaseAt(pos, fraction, done) => {
+                if self.current_pos.is_some() {
+                    self.show_cursor()?;
+                    self.current_pos = None;
+                }
+                let ids = CGDisplay::active_displays().map_err(CaptureError::CoreGraphics)?;
+                let displays: Vec<_> = ids
+                    .into_iter()
+                    .map(|id| {
+                        let b = CGDisplay::new(id).bounds();
+                        input_event::edge::Rect {
+                            left: b.origin.x,
+                            top: b.origin.y,
+                            right: b.origin.x + b.size.width,
+                            bottom: b.origin.y + b.size.height,
+                        }
+                    })
+                    .collect();
+                if let Some((x, y)) = input_event::edge::entry(&displays, pos.edge(), fraction) {
+                    let bounds =
+                        input_event::edge::bounds(&displays).expect("entry requires a display");
+                    let requested = f64::from(fraction) * 100.0 / f64::from(u16::MAX);
+                    let mapped = f64::from(input_event::edge::fraction(bounds, pos.edge(), x, y))
+                        * 100.0
+                        / f64::from(u16::MAX);
+                    log::info!(
+                        "edge-position entry: backend=macos edge={pos} requested={requested:.3}% mapped={mapped:.3}% from top/left target=({x:.3}, {y:.3}) bounds={bounds:?}"
+                    );
+                    CGDisplay::warp_mouse_cursor_position(CGPoint::new(x, y))
+                        .map_err(CaptureError::WarpCursor)?;
+                    match CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+                        .and_then(CGEvent::new)
+                    {
+                        Ok(event) => {
+                            let actual = event.location();
+                            let observed = f64::from(input_event::edge::fraction(
+                                bounds,
+                                pos.edge(),
+                                actual.x,
+                                actual.y,
+                            )) * 100.0
+                                / f64::from(u16::MAX);
+                            log::info!(
+                                "edge-position entry-readback: backend=macos edge={pos} requested={requested:.3}% mapped={mapped:.3}% actual={observed:.3}% from top/left cursor=({:.3}, {:.3}) delta=({:.3}, {:.3})",
+                                actual.x,
+                                actual.y,
+                                actual.x - x,
+                                actual.y - y
+                            );
+                        }
+                        Err(()) => log::warn!(
+                            "edge-position entry-readback failed: backend=macos edge={pos}"
+                        ),
+                    }
+                }
+                let _ = done.send(());
+            }
             ProducerEvent::Release => {
                 if self.current_pos.is_some() {
                     self.show_cursor()?;
@@ -522,7 +581,23 @@ fn create_event_tap<'a>(
                 state
                     .start_capture(cg_ev, new_pos)
                     .unwrap_or_else(|e| log::warn!("{e}"));
-                res_events.push(CaptureEvent::Begin);
+                let b = &state.bounds;
+                let bounds = input_event::edge::Rect {
+                    left: b.xmin,
+                    top: b.ymin,
+                    right: b.xmax,
+                    bottom: b.ymax,
+                };
+                let location = cg_ev.location();
+                let fraction =
+                    input_event::edge::fraction(bounds, new_pos.edge(), location.x, location.y);
+                let percent = f64::from(fraction) * 100.0 / f64::from(u16::MAX);
+                log::info!(
+                    "edge-position exit: backend=macos edge={new_pos} position={percent:.3}% from top/left cursor=({:.3}, {:.3}) bounds={bounds:?}",
+                    location.x,
+                    location.y
+                );
+                res_events.push(CaptureEvent::BeginAt(fraction));
                 notify_tx
                     .blocking_send(ProducerEvent::Grab(new_pos))
                     .expect("Failed to send notification");
@@ -779,6 +854,15 @@ impl Capture for MacOSInputCapture {
             let _ = notify_tx.send(ProducerEvent::Release).await;
         });
         Ok(())
+    }
+
+    async fn release_at(&mut self, pos: Position, fraction: u16) -> Result<(), CaptureError> {
+        let (tx, rx) = oneshot::channel();
+        self.notify_tx
+            .send(ProducerEvent::ReleaseAt(pos, fraction, tx))
+            .await
+            .map_err(|_| CaptureError::ActivationClosed)?;
+        rx.await.map_err(|_| CaptureError::ActivationClosed)
     }
 
     async fn terminate(&mut self) -> Result<(), CaptureError> {

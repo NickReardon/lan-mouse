@@ -27,7 +27,7 @@ pub(crate) enum ICaptureEvent {
     /// The peer acknowledged entry; its network address is now available.
     ClientReady(u64),
     /// a client was entered
-    CaptureBegin(CaptureHandle),
+    CaptureBegin(CaptureHandle, Option<u16>),
     /// capture disabled
     CaptureDisabled,
     /// capture disabled
@@ -58,10 +58,11 @@ pub(crate) enum CaptureType {
     EnterOnly,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum CaptureRequest {
     /// capture must release the mouse
     Release,
+    ReleaseAt(Position, u16, tokio::sync::oneshot::Sender<bool>),
     /// add a capture client
     Create(CaptureHandle, Position, CaptureType),
     /// destory a capture client
@@ -91,6 +92,8 @@ impl Capture {
             request_rx,
             release_bind: Rc::new(RefCell::new(release_bind)),
             state: Default::default(),
+            entry_fraction: None,
+            last_entry: None,
         };
         let task = spawn_local(capture_task.run());
         Self {
@@ -139,6 +142,14 @@ impl Capture {
             .expect("channel closed");
     }
 
+    pub(crate) async fn release_at(&self, pos: Position, fraction: u16) -> bool {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.request_tx
+            .send(CaptureRequest::ReleaseAt(pos, fraction, tx))
+            .expect("channel closed");
+        rx.await.unwrap_or(false)
+    }
+
     pub(crate) async fn event(&mut self) -> ICaptureEvent {
         self.event_rx.recv().await.expect("channel closed")
     }
@@ -175,9 +186,36 @@ struct CaptureTask {
     release_bind: Rc<RefCell<Vec<scancode::Linux>>>,
     request_rx: Receiver<CaptureRequest>,
     state: State,
+    entry_fraction: Option<u16>,
+    /// Most recent cursor placement for an incoming crossing.
+    last_entry: Option<(Position, u16, Instant)>,
 }
 
+/// A peer configured in both directions reports one crossing twice: `Leave`
+/// to our capture and `Enter` to our emulation, with the same position.
+const DUPLICATE_ENTRY_WINDOW: Duration = Duration::from_millis(100);
+
 impl CaptureTask {
+    /// Place the cursor for an incoming crossing, skipping a repeat of the
+    /// placement that was just made for the same crossing.
+    async fn place_entry(
+        &mut self,
+        capture: &mut InputCapture,
+        pos: Position,
+        fraction: u16,
+    ) -> Result<(), CaptureError> {
+        if let Some((prev_pos, prev_fraction, at)) = self.last_entry {
+            if prev_pos == pos && prev_fraction == fraction && at.elapsed() < DUPLICATE_ENTRY_WINDOW
+            {
+                log::debug!("edge-position entry: skipping duplicate placement on {pos} edge");
+                return Ok(());
+            }
+        }
+        capture.release_at(pos, fraction).await?;
+        self.last_entry = Some((pos, fraction, Instant::now()));
+        Ok(())
+    }
+
     fn add_capture(&mut self, handle: CaptureHandle, pos: Position, capture_type: CaptureType) {
         self.captures.push((handle, pos, capture_type));
     }
@@ -219,7 +257,7 @@ impl CaptureTask {
                         CaptureRequest::Reenable => break,
                         CaptureRequest::Create(h, p, t) => self.add_capture(h, p, t),
                         CaptureRequest::Destroy(h) => self.remove_capture(h),
-                        CaptureRequest::Release => { /* nothing to do */ }
+                        CaptureRequest::Release | CaptureRequest::ReleaseAt(..) => { /* nothing to do */ }
                         CaptureRequest::SetReleaseBind(bind) => {
                             self.release_bind.borrow_mut().clone_from(&bind);
                         }
@@ -296,9 +334,16 @@ impl CaptureTask {
                             self.event_tx.send(ICaptureEvent::ClientReady(handle)).expect("channel closed");
                         }
                         // client disconnected
-                        ProtoEvent::Leave(_) => {
+                        ProtoEvent::Leave(_, fraction) => {
+                            let position = self.get_pos(handle);
+                            let was_active = self.active_client == Some(handle);
                             log::info!("releasing capture: left remote client device region");
                             self.release_capture(capture).await?;
+                            if was_active {
+                                if let Some(fraction) = fraction {
+                                    self.place_entry(capture, position, fraction).await?;
+                                }
+                            }
                         },
                         _ => {}
                     }
@@ -306,6 +351,12 @@ impl CaptureTask {
                 e = self.request_rx.recv() => match e.expect("channel closed") {
                     CaptureRequest::Reenable => { /* already active */ },
                     CaptureRequest::Release => self.release_capture(capture).await?,
+                    CaptureRequest::ReleaseAt(pos, fraction, done) => {
+                        self.release_capture(capture).await?;
+                        let result = self.place_entry(capture, pos, fraction).await;
+                        let _ = done.send(result.is_ok());
+                        result?;
+                    }
                     CaptureRequest::Create(h, p, t) => {
                         self.add_capture(h, p, t);
                         capture.create(h, p).await?;
@@ -347,9 +398,25 @@ impl CaptureTask {
             return self.release_capture(capture).await;
         }
 
-        if event == CaptureEvent::Begin {
+        let begin = matches!(event, CaptureEvent::Begin | CaptureEvent::BeginAt(_));
+        let fraction = if let CaptureEvent::BeginAt(fraction) = event {
+            Some(fraction)
+        } else {
+            None
+        };
+        if begin {
+            if let Some(fraction) = fraction {
+                let percent = f64::from(fraction) * 100.0 / f64::from(u16::MAX);
+                let edge = self.get_pos(handle);
+                log::info!(
+                    "edge-position handoff: client={handle} type={:?} leaving={edge} entering={} position={percent:.3}% from top/left ({:.3}% from bottom/right) fraction={fraction}",
+                    self.get_type(handle),
+                    edge.opposite(),
+                    100.0 - percent
+                );
+            }
             self.event_tx
-                .send(ICaptureEvent::CaptureBegin(handle))
+                .send(ICaptureEvent::CaptureBegin(handle, fraction))
                 .expect("channel closed");
         }
 
@@ -366,7 +433,8 @@ impl CaptureTask {
         }
 
         // activated a new client
-        if event == CaptureEvent::Begin && Some(handle) != self.active_client {
+        if begin && Some(handle) != self.active_client {
+            self.entry_fraction = fraction;
             self.state = State::WaitingForAck;
             self.active_client.replace(handle);
             self.event_tx
@@ -377,10 +445,12 @@ impl CaptureTask {
         let opposite_pos = to_proto_pos(self.get_pos(handle).opposite());
 
         let event = match event {
-            CaptureEvent::Begin => ProtoEvent::Enter(opposite_pos),
+            CaptureEvent::Begin | CaptureEvent::BeginAt(_) => {
+                ProtoEvent::Enter(opposite_pos, self.entry_fraction)
+            }
             CaptureEvent::Input(e) => match self.state {
                 // connection not acknowledged, repeat `Enter` event
-                State::WaitingForAck => ProtoEvent::Enter(opposite_pos),
+                State::WaitingForAck => ProtoEvent::Enter(opposite_pos, self.entry_fraction),
                 State::Sending => ProtoEvent::Input(e),
             },
         };
@@ -443,7 +513,7 @@ impl CaptureTask {
             }
 
             log::info!("sending Leave event to client {handle}");
-            if let Err(e) = self.conn.send(ProtoEvent::Leave(0), handle).await {
+            if let Err(e) = self.conn.send(ProtoEvent::Leave(0, None), handle).await {
                 log::warn!("failed to send Leave to client {handle}: {e}");
             }
         }

@@ -11,6 +11,14 @@ Lan Mouse is an open-source Software KVM sharing mouse/keyboard input across loc
 - **Docs stay current.** Update [README.md](README.md) or [DOC.md](DOC.md) when touching public APIs or platform support.
 - **Rust idioms.** Use `Result`/`Option`, `thiserror` for errors, descriptive logs, and concise comments for non-obvious invariants.
 
+## Design approach
+
+- Start with the data: its ownership, lifetime, access patterns, and the transformations required by the task.
+- Prefer procedural functions with explicit inputs, outputs, and control flow. Separate data representation from behavior where useful; minimize hidden mutable state.
+- Prefer concrete types and simple composition. Add abstraction layers or traits when they solve a demonstrated need; retain useful existing backend contracts, enums, and Rust safety idioms.
+- Let the workload guide data layout. Use contiguous storage or batching when justified; do not mechanically require structure-of-arrays or redesign the event/stream pipeline.
+- Measure performance-sensitive changes against a representative workload before adding layout complexity. Record workload and before/after results; speculative optimization or architectural rewrites need separate issues and approval.
+
 ## Terminology
 
 - **Client:** A remote machine that can receive or send input events. Each client is either _active_ (receiving events) or _inactive_ (can send events back). This mutual exclusion prevents feedback loops.
@@ -59,7 +67,15 @@ Run from repo root—no `cd` in scripts.
 
 ## Workflow
 
-1. Clarify ambiguous requirements, especially OS-specific behavior.
-2. Implement minimal change; flag follow-up work.
-3. Add proportional tests; run `cargo test` on affected crates.
-4. Run `cargo fmt` and `cargo clippy --workspace --all-targets --all-features`.
+The owner tests by switching branches in a single checkout and running `cargo build`/`cargo run`. Keep it that way.
+
+- **One checkout.** Work on a normal branch in the repository root. Do not create Git worktrees, separate clones, or custom `--target-dir` locations unless the owner asks.
+- **Branches.** Branch from an up-to-date `main` with a short descriptive name. Check `git status` before switching branches; never switch with uncommitted changes, and never discard or stash the owner's changes without asking. Commit work in progress instead.
+- **Issues.** Use GitHub issues in `NickReardon/lan-mouse` for work worth tracking; link them from commits or PRs. For confirmed bugs, include reproduction steps; label unverified concerns as investigations. Do not file fork-specific work upstream.
+- **Ask first** for large or ambiguous changes, especially OS-specific capture/emulation behavior. Small, clearly requested changes need no separate plan.
+- **Commits.** Make small, coherent commits and push the branch so work is not local-only. Respect commit hooks. Never commit secrets or machine-specific artifacts.
+- **Checks.** For Rust changes, run affected-crate tests, `cargo fmt`, and `cargo clippy --workspace --all-targets --all-features`. Document manual target-OS verification for capture/emulation changes. Report failures and skipped checks honestly.
+- **PRs.** Open a PR against `main` describing the change and how it was tested. Keep it draft while required target-OS verification is outstanding.
+- **Needs explicit approval:** merging, force-pushing or rewriting pushed history, publishing releases, and creating or pushing tags. GitHub builds run only on pushed `v*` tags; development checks run locally.
+
+Other agent entry points must refer to this file rather than duplicate its policy.

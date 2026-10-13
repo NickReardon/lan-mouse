@@ -82,6 +82,7 @@ struct TomlClient {
     activate_on_startup: Option<bool>,
     enter_hook: Option<String>,
     leave_hook: Option<String>,
+    fingerprint: Option<String>,
 }
 
 impl ConfigToml {
@@ -278,6 +279,21 @@ pub struct ConfigClient {
     pub active: bool,
     pub enter_hook: Option<String>,
     pub leave_hook: Option<String>,
+    pub fingerprint: Option<String>,
+}
+
+/// Normalize a pinned fingerprint read from the config file. An invalid
+/// value is kept verbatim rather than dropped: it can never match a real
+/// certificate, so the client fails closed instead of silently being
+/// re-pinned on its next connection.
+fn config_fingerprint(fingerprint: Option<String>) -> Option<String> {
+    fingerprint.map(|fp| match lan_mouse_ipc::normalize_fingerprint(&fp) {
+        Ok(fp) => fp,
+        Err(e) => {
+            log::warn!("{e}: connections to this client will be rejected until it is fixed");
+            fp
+        }
+    })
 }
 
 impl From<TomlClient> for ConfigClient {
@@ -289,6 +305,7 @@ impl From<TomlClient> for ConfigClient {
         let ips = HashSet::from_iter(toml.ips.into_iter().flatten());
         let port = toml.port.unwrap_or(DEFAULT_PORT);
         let pos = toml.position.unwrap_or_default();
+        let fingerprint = config_fingerprint(toml.fingerprint);
         Self {
             ips,
             hostname,
@@ -297,6 +314,7 @@ impl From<TomlClient> for ConfigClient {
             active,
             enter_hook,
             leave_hook,
+            fingerprint,
         }
     }
 }
@@ -317,6 +335,7 @@ impl From<ConfigClient> for TomlClient {
         let activate_on_startup = if client.active { Some(true) } else { None };
         let enter_hook = client.enter_hook;
         let leave_hook = client.leave_hook;
+        let fingerprint = client.fingerprint;
         Self {
             hostname,
             host_name,
@@ -326,6 +345,7 @@ impl From<ConfigClient> for TomlClient {
             activate_on_startup,
             enter_hook,
             leave_hook,
+            fingerprint,
         }
     }
 }
@@ -590,5 +610,51 @@ impl Config {
         let _ = self.watch();
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FINGERPRINT: &str = "00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff";
+
+    fn parse_client(toml: &str) -> ConfigClient {
+        let config: ConfigToml = toml::from_str(toml).expect("valid config");
+        config
+            .clients
+            .expect("clients")
+            .into_iter()
+            .next()
+            .expect("client")
+            .into()
+    }
+
+    #[test]
+    fn client_without_fingerprint_is_unpinned() {
+        let client = parse_client("[[clients]]\nhostname = \"laptop\"\n");
+        assert_eq!(client.fingerprint, None);
+    }
+
+    #[test]
+    fn client_fingerprint_is_normalized() {
+        let upper = FINGERPRINT.replace(':', "").to_uppercase();
+        let client = parse_client(&format!("[[clients]]\nfingerprint = \"{upper}\"\n"));
+        assert_eq!(client.fingerprint.as_deref(), Some(FINGERPRINT));
+    }
+
+    #[test]
+    fn invalid_client_fingerprint_fails_closed() {
+        let client = parse_client("[[clients]]\nfingerprint = \"not-a-fingerprint\"\n");
+        assert_eq!(client.fingerprint.as_deref(), Some("not-a-fingerprint"));
+    }
+
+    #[test]
+    fn client_fingerprint_round_trips() {
+        let client = parse_client(&format!("[[clients]]\nfingerprint = \"{FINGERPRINT}\"\n"));
+        let toml_client: TomlClient = client.into();
+        let serialized = toml::to_string(&toml_client).expect("serialize client");
+        let reparsed: TomlClient = toml::from_str(&serialized).expect("reparse client");
+        assert_eq!(reparsed.fingerprint.as_deref(), Some(FINGERPRINT));
     }
 }
