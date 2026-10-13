@@ -58,4 +58,14 @@ fn main() {
     if x11_emulation {
         println!("cargo::rustc-cfg=x11_emulation");
     }
+
+    // Embed the app icon in lan-mouse.exe (Explorer, taskbar, tray).
+    #[cfg(windows)]
+    {
+        // embed-resource only watches the .rc file, not the icon it includes.
+        println!("cargo::rerun-if-changed=build-aux/windows/lan-mouse.ico");
+        embed_resource::compile("build-aux/windows/lan-mouse.rc", embed_resource::NONE)
+            .manifest_optional()
+            .expect("could not embed Windows resources");
+    }
 }

@@ -268,7 +268,11 @@ async fn receive_loop(
     ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
 ) {
     let mut buf = [0u8; MAX_EVENT_SIZE];
-    while conn.recv(&mut buf).await.is_ok() {
+    loop {
+        buf.fill(0);
+        if conn.recv(&mut buf).await.is_err() {
+            break;
+        }
         match buf.try_into() {
             Ok(event) => {
                 log::trace!("{addr} <==<==<== {event}");

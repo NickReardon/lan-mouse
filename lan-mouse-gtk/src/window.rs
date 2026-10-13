@@ -245,6 +245,9 @@ impl Window {
     }
 
     fn setup_icon(&self) {
+        // On Windows, GTK falls back to the icon embedded in lan-mouse.exe,
+        // which is drawn for dark taskbars; the themed SVG is a black glyph.
+        #[cfg(not(windows))]
         self.set_icon_name(Some("de.feschber.LanMouse"));
     }
 

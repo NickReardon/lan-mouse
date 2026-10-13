@@ -9,8 +9,16 @@ mod macos_privacy;
 #[cfg(target_os = "macos")]
 mod macos_status_item;
 mod window;
+#[cfg(windows)]
+mod windows_tray;
 
-use std::{env, process, str, sync::OnceLock};
+use std::{
+    env, process, str,
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use gtk::CssProvider;
 use window::Window;
@@ -20,6 +28,18 @@ use window::Window;
 /// peer's [`lan_mouse_ipc::ClientState::peer_commit`] for the
 /// soft-warn version-mismatch indicator.
 pub(crate) static LOCAL_COMMIT: OnceLock<[u8; 8]> = OnceLock::new();
+
+/// Set when the daemon announces it is shutting down.
+static DAEMON_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Why the frontend stopped, so the launcher knows whether to stop the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exit {
+    /// The app was quit; the daemon is still running.
+    Quit,
+    /// The daemon announced it is shutting down and will exit on its own.
+    DaemonShutdown,
+}
 
 /// Convenience: returns the local commit as an 8-char ASCII string,
 /// or a placeholder if unset (which would indicate a programmer
@@ -47,32 +67,91 @@ use thiserror::Error;
 pub enum GtkError {
     #[error("gtk frontend exited with non zero exit code: {0}")]
     NonZeroExitCode(i32),
+    #[error("could not initialize GTK: {0}")]
+    Initialization(#[from] glib::BoolError),
 }
 
-pub fn run(local_commit: [u8; 8]) -> Result<(), GtkError> {
+/// Called on the same thread that will run GTK, before registering GApplication.
+pub fn confirm_replacement(force: bool, details: &str) -> Result<bool, GtkError> {
+    #[cfg(target_os = "macos")]
+    configure_macos_bundle_environment();
+    gtk::init()?;
+    let dialog = gtk::MessageDialog::builder()
+        .modal(true)
+        .message_type(if force {
+            gtk::MessageType::Warning
+        } else {
+            gtk::MessageType::Question
+        })
+        .text(if force {
+            "Force close existing Lan Mouse?"
+        } else {
+            "Lan Mouse is already running"
+        })
+        .secondary_text(details)
+        .build();
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button(
+        if force {
+            "Force close and start"
+        } else {
+            "Close existing and start this version"
+        },
+        gtk::ResponseType::Accept,
+    );
+    dialog.set_default_response(gtk::ResponseType::Cancel);
+    let response = glib::MainContext::default().block_on(dialog.run_future());
+    dialog.close();
+    Ok(response == gtk::ResponseType::Accept)
+}
+
+pub fn show_startup_error(message: &str) {
+    #[cfg(target_os = "macos")]
+    configure_macos_bundle_environment();
+    if gtk::init().is_err() {
+        return;
+    }
+    let dialog = gtk::MessageDialog::builder()
+        .modal(true)
+        .message_type(gtk::MessageType::Error)
+        .text("Lan Mouse could not start")
+        .secondary_text(message)
+        .buttons(gtk::ButtonsType::Close)
+        .build();
+    glib::MainContext::default().block_on(dialog.run_future());
+    dialog.close();
+}
+
+pub fn run(
+    local_commit: [u8; 8],
+    connection: (
+        lan_mouse_ipc::FrontendEventReader,
+        lan_mouse_ipc::FrontendRequestWriter,
+    ),
+) -> Result<Exit, GtkError> {
     log::debug!("running gtk frontend");
     LOCAL_COMMIT
         .set(local_commit)
         .expect("local_commit set once");
 
-    #[cfg(windows)]
-    let ret = std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024) // https://gitlab.gnome.org/GNOME/gtk/-/commit/52dbb3f372b2c3ea339e879689c1de535ba2c2c3 -> caused crash on windows
-        .name("gtk".into())
-        .spawn(gtk_main)
-        .unwrap()
-        .join()
-        .unwrap();
-    #[cfg(not(windows))]
-    let ret = gtk_main();
+    // The launcher provides the larger Windows stack for both preflight and GTK.
+    let ret = gtk_main(connection);
 
     match ret {
-        glib::ExitCode::SUCCESS => Ok(()),
+        glib::ExitCode::SUCCESS if DAEMON_SHUTTING_DOWN.load(Ordering::Relaxed) => {
+            Ok(Exit::DaemonShutdown)
+        }
+        glib::ExitCode::SUCCESS => Ok(Exit::Quit),
         e => Err(GtkError::NonZeroExitCode(e.value())),
     }
 }
 
-fn gtk_main() -> glib::ExitCode {
+fn gtk_main(
+    connection: (
+        lan_mouse_ipc::FrontendEventReader,
+        lan_mouse_ipc::FrontendRequestWriter,
+    ),
+) -> glib::ExitCode {
     #[cfg(target_os = "macos")]
     {
         configure_macos_bundle_environment();
@@ -91,7 +170,16 @@ fn gtk_main() -> glib::ExitCode {
         setup_actions(app);
         setup_menu(app);
     });
-    app.connect_activate(build_ui);
+    let connection = std::cell::RefCell::new(Some(connection));
+    app.connect_activate(move |app| {
+        if let Some(window) = app.windows().first() {
+            window.present();
+            return;
+        }
+        if let Some(connection) = connection.borrow_mut().take() {
+            build_ui(app, connection);
+        }
+    });
 
     let args: Vec<&'static str> = vec![];
     app.run_with_args(&args)
@@ -183,6 +271,9 @@ fn setup_actions(app: &adw::Application) {
         }
     });
     app.add_action(&quit_action);
+    // GTK's macOS backend already binds Cmd+Q to app.quit.
+    #[cfg(not(target_os = "macos"))]
+    app.set_accels_for_action("app.quit", &["<primary>q"]);
 }
 
 // Set up a global menu
@@ -198,37 +289,19 @@ fn setup_menu(app: &adw::Application) {
     app.set_menubar(Some(&menu))
 }
 
-fn build_ui(app: &Application) {
+fn build_ui(
+    app: &Application,
+    (mut frontend_rx, frontend_tx): (
+        lan_mouse_ipc::FrontendEventReader,
+        lan_mouse_ipc::FrontendRequestWriter,
+    ),
+) {
     // If a window already exists (re-activation), just present it
     if let Some(window) = app.windows().first() {
         window.present();
         return;
     }
 
-    log::debug!("connecting to lan-mouse-socket");
-    let (mut frontend_rx, frontend_tx) = match lan_mouse_ipc::try_connect() {
-        Ok(conn) => conn,
-        Err(e) => {
-            log::warn!("could not connect to daemon ({e}), spawning a new one");
-            if let Err(spawn_err) = process::Command::new(
-                env::current_exe().expect("could not determine executable path"),
-            )
-            .args(env::args().skip(1))
-            .arg("daemon")
-            .spawn()
-            {
-                log::error!("failed to spawn daemon: {spawn_err}");
-                process::exit(1);
-            }
-            match lan_mouse_ipc::connect() {
-                Ok(conn) => conn,
-                Err(e) => {
-                    log::error!("{e}");
-                    process::exit(1);
-                }
-            }
-        }
-    };
     log::debug!("connected to lan-mouse-socket");
 
     let (sender, receiver) = async_channel::bounded(10);
@@ -236,7 +309,11 @@ fn build_ui(app: &Application) {
     gio::spawn_blocking(move || {
         while let Some(e) = frontend_rx.next_event() {
             match e {
-                Ok(e) => sender.send_blocking(e).unwrap(),
+                Ok(e) => {
+                    if sender.send_blocking(e).is_err() {
+                        break;
+                    }
+                }
                 Err(e) => {
                     log::error!("{e}");
                     break;
@@ -246,6 +323,10 @@ fn build_ui(app: &Application) {
     });
 
     let window = Window::new(app, frontend_tx);
+    #[cfg(windows)]
+    if let Err(e) = windows_tray::setup(app, &window) {
+        log::warn!("could not create tray icon; closing the window will quit Lan Mouse: {e}");
+    }
     #[cfg(target_os = "macos")]
     {
         window.connect_close_request(|window| {
@@ -289,6 +370,14 @@ fn build_ui(app: &Application) {
             loop {
                 let notify = receiver.recv().await.unwrap_or_else(|_| process::exit(1));
                 match notify {
+                    FrontendEvent::InstanceInfo { .. } => {}
+                    FrontendEvent::ShuttingDown => {
+                        DAEMON_SHUTTING_DOWN.store(true, Ordering::Relaxed);
+                        if let Some(app) = window.application() {
+                            app.quit();
+                        }
+                        break;
+                    }
                     FrontendEvent::Created(handle, client, state) => {
                         window.new_client(handle, client, state)
                     }

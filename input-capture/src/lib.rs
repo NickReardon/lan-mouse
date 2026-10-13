@@ -39,6 +39,8 @@ pub type CaptureHandle = u64;
 pub enum CaptureEvent {
     /// capture on this capture handle is now active
     Begin,
+    /// Capture began at a normalized coordinate along the desktop edge.
+    BeginAt(u16),
     /// input event coming from capture handle
     Input(Event),
 }
@@ -46,6 +48,7 @@ pub enum CaptureEvent {
 impl Display for CaptureEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            CaptureEvent::BeginAt(fraction) => write!(f, "begin capture at {fraction}"),
             CaptureEvent::Begin => write!(f, "begin capture"),
             CaptureEvent::Input(e) => write!(f, "{e}"),
         }
@@ -61,6 +64,14 @@ pub enum Position {
 }
 
 impl Position {
+    pub fn edge(self) -> input_event::edge::Edge {
+        match self {
+            Self::Left => input_event::edge::Edge::Left,
+            Self::Right => input_event::edge::Edge::Right,
+            Self::Top => input_event::edge::Edge::Top,
+            Self::Bottom => input_event::edge::Edge::Bottom,
+        }
+    }
     pub fn opposite(&self) -> Self {
         match self {
             Position::Left => Self::Right,
@@ -171,6 +182,12 @@ impl InputCapture {
         self.capture.release().await
     }
 
+    /// Release at the relative coordinate on the given local edge.
+    pub async fn release_at(&mut self, pos: Position, fraction: u16) -> Result<(), CaptureError> {
+        self.pressed_keys.clear();
+        self.capture.release_at(pos, fraction).await
+    }
+
     /// Drain and return every key the capture has forwarded as
     /// down-but-not-up. The caller is expected to synthesize key-up
     /// events to the remote peer for each — otherwise the peer
@@ -276,6 +293,9 @@ impl Stream for InputCapture {
     }
 }
 
+// async_trait marks its boxed futures #[must_use], which clippy flags as redundant.
+// Fixed in async-trait 0.1.92. Remove this allow with the dependency refresh in #35.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 trait Capture: Stream<Item = Result<(Position, CaptureEvent), CaptureError>> + Unpin {
     /// create a new client with the given id
@@ -286,6 +306,8 @@ trait Capture: Stream<Item = Result<(Position, CaptureEvent), CaptureError>> + U
 
     /// release mouse
     async fn release(&mut self) -> Result<(), CaptureError>;
+
+    async fn release_at(&mut self, pos: Position, fraction: u16) -> Result<(), CaptureError>;
 
     /// destroy the input capture
     async fn terminate(&mut self) -> Result<(), CaptureError>;

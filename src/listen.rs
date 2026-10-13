@@ -79,19 +79,21 @@ impl LanMouseListener {
             let connection_attempts = connection_attempts.clone();
             Some(Arc::new(
                 move |certs: &[Vec<u8>], _chains: &[CertificateDer<'static>]| {
-                    assert!(certs.len() == 1);
-                    let fingerprints = certs
-                        .iter()
-                        .map(|c| crypto::generate_fingerprint(c))
-                        .collect::<Vec<_>>();
-                    if authorized
-                        .read()
-                        .expect("lock")
-                        .contains_key(&fingerprints[0])
-                    {
+                    // runs before the peer is authorized, so the certificate
+                    // list is attacker controlled: reject, never panic
+                    let [cert] = certs else {
+                        log::warn!(
+                            "rejected peer presenting {} certificates, expected exactly one",
+                            certs.len()
+                        );
+                        // not ErrVerifyDataMismatch: that error is paired with
+                        // an entry in `connection_attempts` by the accept loop
+                        return Err(webrtc_dtls::Error::ErrInvalidCertificate);
+                    };
+                    let fingerprint = crypto::generate_fingerprint(cert);
+                    if authorized.read().expect("lock").contains_key(&fingerprint) {
                         Ok(())
                     } else {
-                        let fingerprint = fingerprints.into_iter().next().expect("fingerprint");
                         connection_attempts
                             .lock()
                             .expect("lock")
@@ -253,7 +255,11 @@ async fn read_loop(
 ) -> Result<(), Error> {
     let mut b = [0u8; MAX_EVENT_SIZE];
 
-    while conn.recv(&mut b).await.is_ok() {
+    loop {
+        b.fill(0);
+        if conn.recv(&mut b).await.is_err() {
+            break;
+        }
         match b.try_into() {
             Ok(event) => dtls_tx
                 .send(ListenEvent::Msg { event, addr })
@@ -280,4 +286,88 @@ async fn read_loop(
         .expect("connection not found");
     conns.remove(index);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::UdpSocket;
+    use webrtc_dtls::config::ExtendedMasterSecretType;
+
+    fn certificate() -> Certificate {
+        Certificate::generate_self_signed(["ignored".to_owned()]).expect("certificate")
+    }
+
+    /// Reserve a free UDP port on localhost for the listener.
+    async fn free_port() -> u16 {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        socket.local_addr().expect("local address").port()
+    }
+
+    /// Run a client handshake against the listener, presenting `certificates`.
+    async fn handshake(
+        port: u16,
+        certificates: Vec<Certificate>,
+    ) -> Result<(), webrtc_dtls::Error> {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        socket.connect(("127.0.0.1", port)).await.expect("connect");
+        let config = Config {
+            certificates,
+            insecure_skip_verify: true,
+            extended_master_secret: ExtendedMasterSecretType::Require,
+            ..Default::default()
+        };
+        let handshake = DTLSConn::new(Arc::new(socket), config, true, None);
+        let conn = tokio::time::timeout(Duration::from_secs(5), handshake)
+            .await
+            .map_err(|_| webrtc_dtls::Error::Other("handshake timed out".into()))??;
+        let _ = conn.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unexpected_certificate_counts_are_rejected_and_listener_keeps_accepting() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let authorized_cert = certificate();
+                let authorized: Arc<RwLock<HashMap<String, String>>> = Default::default();
+                authorized.write().expect("lock").insert(
+                    crypto::certificate_fingerprint(&authorized_cert),
+                    "authorized".into(),
+                );
+                let port = free_port().await;
+                let mut listener = LanMouseListener::new(port, certificate(), authorized)
+                    .await
+                    .expect("listener");
+
+                // a peer presenting a two-certificate chain, signing with the leaf key
+                let mut chain = certificate();
+                chain.certificate.push(certificate().certificate[0].clone());
+                assert!(handshake(port, vec![chain]).await.is_err());
+
+                // a peer presenting no certificate at all
+                assert!(handshake(port, vec![]).await.is_err());
+
+                // the listener must survive: an unauthorized peer is still
+                // reported with its own fingerprint, so the rejections above
+                // did not desynchronize the connection attempt queue
+                let unauthorized = certificate();
+                let unauthorized_fingerprint = crypto::certificate_fingerprint(&unauthorized);
+                assert!(handshake(port, vec![unauthorized]).await.is_err());
+                let event = tokio::time::timeout(Duration::from_secs(5), listener.next())
+                    .await
+                    .expect("listen event");
+                assert!(matches!(
+                    event,
+                    Some(ListenEvent::Rejected { fingerprint }) if fingerprint == unauthorized_fingerprint
+                ));
+
+                // and authorized peers are still accepted
+                handshake(port, vec![authorized_cert])
+                    .await
+                    .expect("authorized peer accepted after rejected peers");
+            })
+            .await;
+    }
 }

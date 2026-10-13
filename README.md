@@ -71,8 +71,9 @@ Choose `lan-mouse-windows-x86_64.zip` for Windows,
 `lan-mouse-macos-arm64.zip` for Apple silicon, or
 `lan-mouse-macos-intel.zip` for Intel Macs.
 
-On Windows, extract the entire ZIP and run `lan-mouse.exe` from the extracted
-folder so it can find the included DLLs. On macOS, extract `Lan Mouse.app` and
+On Windows, extract the entire ZIP, keeping its `share` subfolder, and run
+`lan-mouse.exe` from the extracted folder so it can find the included DLLs and
+GTK settings schemas. On macOS, extract `Lan Mouse.app` and
 follow the macOS launch and Accessibility permission instructions below.
 
 Version tags matching `v*` (for example, `v0.11.1`) run the GitHub build
@@ -88,76 +89,20 @@ so successful packages remain available even if another platform fails. Artifact
 downloads require signing in to GitHub; extract the artifact download first,
 then extract the app ZIP inside it.
 
-### Building a branch locally
+### Testing a branch locally
 
-Build an existing branch checkout without switching the current checkout:
-
-```powershell
-.\scripts\branch-build.cmd build codex/edge-position
-# Create a missing checkout under the base repository's .worktrees/:
-.\scripts\branch-build.cmd build codex/edge-position -CreateWorktree
-```
-
-The Windows `.cmd` launcher works from Command Prompt and PowerShell. It runs
-the PowerShell helper with an execution-policy bypass limited to that child
-process; it does not change your saved user or machine execution policy.
-The `.ps1` entry point remains available when your policy permits scripts.
+With Rust and the platform's GTK development dependencies installed (see
+[Dependencies & Compiling from Source](#dependencies--compiling-from-source)), switch to the branch and run it:
 
 ```sh
-bash scripts/branch-build.sh build codex/edge-position
-bash scripts/branch-build.sh build codex/edge-position --create-worktree
+git fetch origin
+git switch codex/edge-position
+cargo run
 ```
 
-This runs `cargo build --locked -p lan-mouse` in the selected checkout, including
-its uncommitted changes. A missing worktree is created only with the explicit
-flag. If the branch is not local, the helper fetches it from origin and creates
-a tracking branch. Both `codex/edge-position` and `origin/codex/edge-position`
-select that branch. A nonexistent branch or failed fetch stops the command.
-Rust and the platform's GTK development dependencies are
-required. Windows detects the standard `C:\gtk-build\gtk\x64\release` installation
-or uses `PKG_CONFIG`/pkg-config from the environment.
-
-The helper can be called from the base repo or any linked worktree; it finds
-the requested branch through Git without switching branches or changing your
-current directory. Cargo's target directory is the **base repository's** ignored
-`builds/<branch-with-slashes-replaced-by-hyphens>/` folder, including all dependency
-caches and intermediate files. Newly created worktrees use the same flat naming
-under `.worktrees/`; existing checkouts are reused at their current paths.
-For `codex/edge-position`, a normal debug build produces
-`builds/codex-edge-position/debug/lan-mouse.exe` on Windows, or `lan-mouse` on
-macOS/Linux. No output is copied into worktrees. Windows builds copy the GTK
-runtime DLLs beside the executable, plus compiled settings schemas under
-`share/glib-2.0/schemas/`, so it can be launched directly without setting PATH
-or schema environment variables. Windows release ZIPs include the same runtime
-files; extract the complete ZIP and preserve its subfolders.
-macOS/Linux builds use installed runtime libraries.
-The scripts print the source checkout, commit, and output folder;
-they do not launch the result automatically. A branch marker prevents different
-branch names that flatten to the same folder from sharing build artifacts.
-
-### Testing a branch with packaged builds
-
-Install [GitHub CLI](https://cli.github.com) and run `gh auth login` first.
-The target branch must include the manual Release workflow trigger.
-
-```powershell
-# Windows: request a build, then download and launch after it completes.
-.\scripts\branch-build.cmd -Branch codex/edge-position -Build
-.\scripts\branch-build.cmd -Branch codex/edge-position -Launch
-```
-
-```sh
-# macOS or Linux (macOS also requires unzip).
-bash scripts/branch-build.sh codex/edge-position --build
-bash scripts/branch-build.sh codex/edge-position --launch
-```
-
-The scripts reuse successful builds of the current remote commit, print the
-commit and run URL, and download into a unique folder under Downloads.
-Quit other Lan Mouse instances before launching. Use `-RunId ID` on Windows
-or `--run-id ID` on macOS/Linux to test the same completed run across machines.
-Manual build artifacts expire after one day. These commands do not switch
-your local branch and require no local Rust or GTK development tools.
+All branches share the repository's `target/` directory, so switching branches
+only rebuilds what changed. On Windows, `C:\gtk-build\gtk\x64\release\bin` must
+be on `PATH` for both building and running.
 
 <details>
     <summary>Arch Linux</summary>
@@ -202,7 +147,7 @@ dnf install lan-mouse
 - Unzip it
 - Remove the quarantine with `xattr -rd com.apple.quarantine "Lan Mouse.app"`
 - Launch the app
-- Use the menu bar item to open the settings window or quit Lan Mouse. Bundled macOS builds run as a menu bar app and do not keep a Dock icon visible.
+- Use the menu bar item to open the settings window or quit Lan Mouse. Lan Mouse shows a Dock icon while its window is open; closing the window hides it and keeps sharing active from the menu bar.
 - Grant accessibility permissions in System Preferences
 
 </details>
@@ -215,6 +160,12 @@ Lan Mouse can be installed from the [winget community repositories](https://gith
 ```sh
 winget install lan-mouse
 ```
+
+Closing the window hides Lan Mouse to the notification area (system tray) and
+keeps sharing active. Click the tray icon, or choose **Open Lan Mouse** from its
+menu, to reopen the window. Choose **Quit Lan Mouse** from the tray menu or the
+window menu to exit and stop the sharing daemon the app started. If the tray
+icon cannot be created, closing the window quits Lan Mouse.
 
 </details>
 
@@ -292,11 +243,9 @@ For a detailed list of available features, checkout the [Cargo.toml](./Cargo.tom
 
 ## Development
 
-For agent collaboration, start with [AGENTS.md](AGENTS.md) and
-[CONTRIBUTING.md](CONTRIBUTING.md). Work is planned and approved in focused
-issues before claiming or branching, then implemented in isolated `.worktrees/`
-checkouts with frequent commits, pushes, and a draft PR. Claude Code reads the
-same policy through [CLAUDE.md](CLAUDE.md).
+Work happens on ordinary branches in a single checkout: switch branches, then
+`cargo build` or `cargo run` to test. Agent instructions live in
+[AGENTS.md](AGENTS.md); Claude Code reads them through [CLAUDE.md](CLAUDE.md).
 
 ### Git pre-commit hook
 
@@ -315,6 +264,18 @@ git config core.hooksPath .githooks
 ```
 
 The `pre-commit` script runs `cargo fmt --all` (and fails if files were modified), `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and `cargo test --workspace --all-features`.
+
+### App icons
+
+The Windows icon (`build-aux/windows/lan-mouse.ico`, embedded in `lan-mouse.exe`
+and used by the tray) and the macOS Dock and menu bar images
+(`lan-mouse-gtk/resources/macos/`) are generated from
+`lan-mouse-gtk/resources/de.feschber.LanMouse.svg` and committed. After
+changing the SVG, regenerate them with `rsvg-convert` and Pillow installed:
+
+```sh
+python scripts/make-app-icons.py
+```
 
 ### Dependencies & Compiling from Source
 <details>
@@ -430,6 +391,10 @@ It is of the form "aa:bb:cc:..."
 
 Authorized devices can be persisted using the configuration file (see [Configuration](#configuration)).
 
+On Windows and macOS, closing the window keeps Lan Mouse running in the
+notification area or menu bar. Use **Quit Lan Mouse** in the window menu or the
+tray/menu bar menu to exit.
+
 If the device still can not be entered, make sure you have UDP port `4242` (or the one selected) opened up in your firewall.
 </details>
 
@@ -453,6 +418,36 @@ for information on how to use a specific command.
     <summary>Daemon Mode</summary>
 
 Lan Mouse can be launched in daemon mode to keep it running in the background (e.g. for use in a systemd-service).
+
+When launching another copy on Windows, macOS, or Linux, Lan Mouse checks for
+existing apps and daemons owned by your user. Choose **Close existing and start
+this version** to replace them with the executable you just launched, including
+its command-line configuration. Input sharing stops briefly during replacement.
+**Cancel** exits the new launch and leaves the existing session running.
+
+New builds shut down cooperatively and release held input. Older builds may need
+a second **Force close and start** confirmation, especially on Windows. Force
+closing can skip input cleanup. Lan Mouse verifies executable markers, process
+owner, path, PID, and start time before targeting a process; it never closes a
+process based only on its name or an occupied port. Processes that cannot be
+verified or accessed cause an error instead of being terminated. Keep the normal
+`lan-mouse` executable name so installed and test builds can be identified.
+
+Interactive `lan-mouse daemon` launches offer terminal confirmation. Unattended
+daemon launches report a conflict and exit with an error instead of waiting for
+input or replacing a running instance. `lan-mouse cli` continues controlling the
+running daemon, and capture/emulation test subcommands do not replace it.
+Concurrent launches are serialized during startup; retry if another launch is
+already in progress. On Linux the startup lock follows the per-user IPC runtime
+directory. If systemd or another supervisor restarts a daemon during replacement,
+Lan Mouse reports the conflict; stop or pause that service before retrying. It
+does not modify service-manager configuration or request elevated privileges.
+
+This check runs when an executable is actually launched. OS actions that only
+reactivate an existing application (for example, macOS Launch Services reopening
+an already running app) retain that OS behavior; launch the desired test build's
+executable to request replacement. Local IPC lifecycle support requires matching
+0.4 frontends/daemons; older builds use the process-based replacement fallback.
 
 To do so, use the `daemon` subcommand:
 

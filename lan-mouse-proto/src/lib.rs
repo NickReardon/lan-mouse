@@ -50,10 +50,10 @@ impl Display for Position {
 pub enum ProtoEvent {
     /// notify a client that the cursor entered its region at the given position
     /// [`ProtoEvent::Ack`] with the same serial is used for synchronization between devices
-    Enter(Position),
+    Enter(Position, Option<u16>),
     /// notify a client that the cursor left its region
     /// [`ProtoEvent::Ack`] with the same serial is used for synchronization between devices
-    Leave(u32),
+    Leave(u32, Option<u16>),
     /// acknowledge of an [`ProtoEvent::Enter`] or [`ProtoEvent::Leave`] event
     Ack(u32),
     /// Input event
@@ -77,8 +77,8 @@ pub enum ProtoEvent {
 impl Display for ProtoEvent {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProtoEvent::Enter(s) => write!(f, "Enter({s})"),
-            ProtoEvent::Leave(s) => write!(f, "Leave({s})"),
+            ProtoEvent::Enter(s, fraction) => write!(f, "Enter({s}, {fraction:?})"),
+            ProtoEvent::Leave(s, fraction) => write!(f, "Leave({s}, {fraction:?})"),
             ProtoEvent::Ack(s) => write!(f, "Ack({s})"),
             ProtoEvent::Input(e) => write!(f, "{e}"),
             ProtoEvent::Ping => write!(f, "ping"),
@@ -131,8 +131,8 @@ impl ProtoEvent {
             },
             ProtoEvent::Ping => EventType::Ping,
             ProtoEvent::Pong(_) => EventType::Pong,
-            ProtoEvent::Enter(_) => EventType::Enter,
-            ProtoEvent::Leave(_) => EventType::Leave,
+            ProtoEvent::Enter(..) => EventType::Enter,
+            ProtoEvent::Leave(..) => EventType::Leave,
             ProtoEvent::Ack(_) => EventType::Ack,
             ProtoEvent::Hello { .. } => EventType::Hello,
         }
@@ -186,8 +186,14 @@ impl TryFrom<[u8; MAX_EVENT_SIZE]> for ProtoEvent {
             ))),
             EventType::Ping => Ok(Self::Ping),
             EventType::Pong => Ok(Self::Pong(decode_u8(&mut buf)? != 0)),
-            EventType::Enter => Ok(Self::Enter(decode_u8(&mut buf)?.try_into()?)),
-            EventType::Leave => Ok(Self::Leave(decode_u32(&mut buf)?)),
+            EventType::Enter => Ok(Self::Enter(
+                decode_u8(&mut buf)?.try_into()?,
+                decode_fraction(&mut buf)?,
+            )),
+            EventType::Leave => Ok(Self::Leave(
+                decode_u32(&mut buf)?,
+                decode_fraction(&mut buf)?,
+            )),
             EventType::Ack => Ok(Self::Ack(decode_u32(&mut buf)?)),
             EventType::Hello => {
                 let mut commit = [0u8; 8];
@@ -257,8 +263,14 @@ impl From<ProtoEvent> for ([u8; MAX_EVENT_SIZE], usize) {
                 },
                 ProtoEvent::Ping => {}
                 ProtoEvent::Pong(alive) => encode_u8(buf, len, alive as u8),
-                ProtoEvent::Enter(pos) => encode_u8(buf, len, pos as u8),
-                ProtoEvent::Leave(serial) => encode_u32(buf, len, serial),
+                ProtoEvent::Enter(pos, fraction) => {
+                    encode_u8(buf, len, pos as u8);
+                    encode_fraction(buf, len, fraction);
+                }
+                ProtoEvent::Leave(serial, fraction) => {
+                    encode_u32(buf, len, serial);
+                    encode_fraction(buf, len, fraction);
+                }
                 ProtoEvent::Ack(serial) => encode_u32(buf, len, serial),
                 ProtoEvent::Hello { commit } => {
                     for b in commit.iter() {
@@ -284,6 +296,7 @@ macro_rules! decode_impl {
 }
 
 decode_impl!(u8);
+decode_impl!(u16);
 decode_impl!(u32);
 decode_impl!(i32);
 decode_impl!(f64);
@@ -304,6 +317,78 @@ macro_rules! encode_impl {
 }
 
 encode_impl!(u8);
+encode_impl!(u16);
 encode_impl!(u32);
 encode_impl!(i32);
 encode_impl!(f64);
+
+// The receive path zero-pads legacy packets. An explicit presence byte keeps
+// old Enter/Leave packets distinct from a valid coordinate of zero.
+fn decode_fraction(buf: &mut &[u8]) -> Result<Option<u16>, ProtocolError> {
+    Ok(if decode_u8(buf)? == 1 {
+        Some(decode_u16(buf)?)
+    } else {
+        None
+    })
+}
+fn encode_fraction(buf: &mut &mut [u8], len: &mut usize, fraction: Option<u16>) {
+    if let Some(fraction) = fraction {
+        encode_u8(buf, len, 1);
+        encode_u16(buf, len, fraction);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handoffs_round_trip_coordinates_on_every_edge() {
+        for pos in [
+            Position::Left,
+            Position::Right,
+            Position::Top,
+            Position::Bottom,
+        ] {
+            for fraction in [None, Some(0), Some(6553), Some(u16::MAX)] {
+                let (bytes, len) = ProtoEvent::Enter(pos, fraction).into();
+                assert_eq!(len, if fraction.is_some() { 5 } else { 2 });
+                assert_eq!(&bytes[..2], &[EventType::Enter as u8, pos as u8]);
+                match ProtoEvent::try_from(bytes).unwrap() {
+                    ProtoEvent::Enter(decoded_pos, decoded_fraction) => {
+                        assert_eq!(decoded_pos as u8, pos as u8);
+                        assert_eq!(decoded_fraction, fraction);
+                    }
+                    other => panic!("unexpected {other}"),
+                }
+                let (bytes, len) = ProtoEvent::Leave(42, fraction).into();
+                assert_eq!(len, if fraction.is_some() { 8 } else { 5 });
+                match ProtoEvent::try_from(bytes).unwrap() {
+                    ProtoEvent::Leave(serial, decoded_fraction) => {
+                        assert_eq!(serial, 42);
+                        assert_eq!(decoded_fraction, fraction);
+                    }
+                    other => panic!("unexpected {other}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_handoffs_have_no_coordinate() {
+        let mut bytes = [0; MAX_EVENT_SIZE];
+        bytes[0] = EventType::Enter as u8;
+        bytes[1] = Position::Bottom as u8;
+        assert!(matches!(
+            ProtoEvent::try_from(bytes),
+            Ok(ProtoEvent::Enter(Position::Bottom, None))
+        ));
+        bytes.fill(0);
+        bytes[0] = EventType::Leave as u8;
+        bytes[4] = 17;
+        assert!(matches!(
+            ProtoEvent::try_from(bytes),
+            Ok(ProtoEvent::Leave(17, None))
+        ));
+    }
+}
