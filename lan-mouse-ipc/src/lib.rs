@@ -148,6 +148,13 @@ pub struct ClientConfig {
     /// `None` until the first successful connection pins it
     #[serde(default)]
     pub fingerprint: Option<String>,
+    /// share the clipboard with this client on control switches
+    #[serde(default = "default_clipboard")]
+    pub clipboard: bool,
+}
+
+fn default_clipboard() -> bool {
+    true
 }
 
 impl Default for ClientConfig {
@@ -160,6 +167,7 @@ impl Default for ClientConfig {
             cmd: None,
             leave_cmd: None,
             fingerprint: None,
+            clipboard: true,
         }
     }
 }
@@ -315,6 +323,8 @@ pub enum FrontendRequest {
     SaveConfiguration,
     /// set or clear the pinned certificate fingerprint of a client
     UpdateFingerprint(ClientHandle, Option<String>),
+    /// enable or disable clipboard sharing with a client
+    UpdateClipboard(ClientHandle, bool),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -405,5 +415,7 @@ mod tests {
         let json = r#"{"hostname":null,"fix_ips":[],"port":4242,"pos":"left","cmd":null,"leave_cmd":null}"#;
         let config: ClientConfig = serde_json::from_str(json).expect("valid client config");
         assert_eq!(config.fingerprint, None);
+        // clipboard sharing is opt-out
+        assert!(config.clipboard);
     }
 }

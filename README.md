@@ -532,6 +532,8 @@ ips = ["192.168.178.156"]
 # device presenting a different certificate are refused. If omitted, the
 # certificate seen on the first connection is pinned and saved here.
 fingerprint = "bc:05:ab:7a:a4:de:88:8c:2f:92:ac:bc:b8:49:b8:24:0d:44:b3:e6:a4:ef:d7:0b:6c:69:6d:77:53:0b:14:80"
+# optional: turn clipboard sharing off for this client (default: on)
+# clipboard = false
 
 # define a client on the left side with IP address 192.168.178.189
 [[clients]]
@@ -564,9 +566,13 @@ that supports it. It only works with peers this computer already trusts:
 - **Receiving from a device:** the device must be authorized, through the
   Authorize dialog or `[authorized_fingerprints]`.
 
-A client without a pinned certificate yet is skipped and logged. To turn
-clipboard sharing off, add this as a top-level table in `config.toml`, outside
-any `[[clients]]` entry. Changes reload with the configuration file.
+A client without a pinned certificate yet is skipped and logged.
+
+To turn clipboard sharing off for **one client**, switch off **share clipboard**
+in that client's settings, or add `clipboard = false` to its `[[clients]]`
+entry. To turn it off **everywhere**, add this as a top-level table in
+`config.toml`, outside any `[[clients]]` entry. Changes reload with the
+configuration file.
 
 ```toml
 [clipboard]

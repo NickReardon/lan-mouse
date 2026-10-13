@@ -282,6 +282,10 @@ impl Service {
                 self.update_fingerprint(handle, fingerprint);
                 self.save_config();
             }
+            FrontendRequest::UpdateClipboard(handle, clipboard) => {
+                self.update_clipboard(handle, clipboard);
+                self.save_config();
+            }
         }
     }
 
@@ -298,6 +302,7 @@ impl Service {
                 enter_hook: c.cmd,
                 leave_hook: c.leave_cmd,
                 fingerprint: c.fingerprint,
+                clipboard: c.clipboard,
             })
             .collect();
         self.config.set_clients(clients);
@@ -752,6 +757,21 @@ impl Service {
             match &fingerprint {
                 Some(fp) => log::info!("client {handle}: pinned certificate fingerprint {fp}"),
                 None => log::info!("client {handle}: cleared pinned certificate fingerprint"),
+            }
+        }
+        self.broadcast_client(handle);
+    }
+
+    fn update_clipboard(&mut self, handle: ClientHandle, clipboard: bool) {
+        if self.client_manager.set_clipboard(handle, clipboard) {
+            log::info!(
+                "client {handle}: clipboard sharing {}",
+                if clipboard { "enabled" } else { "disabled" }
+            );
+            if !clipboard {
+                if let Some(clipboard) = &mut self.clipboard {
+                    clipboard.cancel();
+                }
             }
         }
         self.broadcast_client(handle);

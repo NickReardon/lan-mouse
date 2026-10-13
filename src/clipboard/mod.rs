@@ -49,12 +49,17 @@ pub(crate) struct Settings {
 /// Why no clipboard transfer is made for a client.
 #[derive(Debug, PartialEq, Eq)]
 enum Skip {
+    /// sharing is turned off for this client
+    Disabled,
     /// no certificate pinned yet, so the destination cannot be authenticated
     Unpinned,
 }
 
 /// The certificate fingerprint a transfer to this client must present.
 fn destination(config: &ClientConfig) -> Result<&str, Skip> {
+    if !config.clipboard {
+        return Err(Skip::Disabled);
+    }
     config.fingerprint.as_deref().ok_or(Skip::Unpinned)
 }
 
@@ -127,6 +132,7 @@ impl Clipboard {
         };
         let fingerprint = match destination(config) {
             Ok(fingerprint) => fingerprint.to_owned(),
+            Err(Skip::Disabled) => return,
             Err(Skip::Unpinned) => {
                 log::info!("clipboard sharing skipped for {addr}: no certificate pinned yet");
                 return;
@@ -555,5 +561,15 @@ host = 'aa'"
         assert_eq!(destination(&config), Err(Skip::Unpinned));
         config.fingerprint = Some("ab".repeat(32));
         assert_eq!(destination(&config), Ok("ab".repeat(32).as_str()));
+    }
+
+    #[test]
+    fn disabled_client_is_skipped_even_when_pinned() {
+        let config = ClientConfig {
+            fingerprint: Some("ab".repeat(32)),
+            clipboard: false,
+            ..Default::default()
+        };
+        assert_eq!(destination(&config), Err(Skip::Disabled));
     }
 }

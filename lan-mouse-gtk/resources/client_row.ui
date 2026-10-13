@@ -83,6 +83,19 @@
 				</child>
 			</object>
 		</child>
+		<!-- clipboard sharing -->
+		<child>
+			<object class="AdwActionRow" id="clipboard_row">
+				<property name="title" translatable="yes">share clipboard</property>
+				<property name="subtitle" translatable="yes">send copied text when control moves here, fetch it when control returns</property>
+				<property name="activatable-widget">clipboard_switch</property>
+				<child>
+					<object class="GtkSwitch" id="clipboard_switch">
+						<property name="valign">center</property>
+					</object>
+				</child>
+			</object>
+		</child>
 		<!-- delete button -->
 		<child>
 			<object class="AdwActionRow" id="delete_row">

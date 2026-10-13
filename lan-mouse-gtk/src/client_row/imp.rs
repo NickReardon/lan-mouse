@@ -34,11 +34,14 @@ pub struct ClientRow {
     pub fingerprint_row: TemplateChild<ActionRow>,
     #[template_child]
     pub fingerprint_clear_button: TemplateChild<gtk::Button>,
+    #[template_child]
+    pub clipboard_switch: TemplateChild<gtk::Switch>,
     pub bindings: RefCell<Vec<Binding>>,
     hostname_change_handler: RefCell<Option<SignalHandlerId>>,
     port_change_handler: RefCell<Option<SignalHandlerId>>,
     position_change_handler: RefCell<Option<SignalHandlerId>>,
     set_state_handler: RefCell<Option<SignalHandlerId>>,
+    clipboard_handler: RefCell<Option<SignalHandlerId>>,
     pub client_object: RefCell<Option<ClientObject>>,
 }
 
@@ -114,6 +117,15 @@ impl ObjectImpl for ClientRow {
             }
         ));
         self.set_state_handler.replace(Some(handler));
+        let handler = self.clipboard_switch.connect_active_notify(clone!(
+            #[weak(rename_to = row)]
+            self,
+            move |switch| {
+                row.obj()
+                    .emit_by_name::<()>("request-clipboard", &[&switch.is_active()]);
+            }
+        ));
+        self.clipboard_handler.replace(Some(handler));
     }
 
     fn signals() -> &'static [glib::subclass::Signal] {
@@ -125,6 +137,9 @@ impl ObjectImpl for ClientRow {
                     .build(),
                 Signal::builder("request-delete").build(),
                 Signal::builder("request-fingerprint-clear").build(),
+                Signal::builder("request-clipboard")
+                    .param_types([bool::static_type()])
+                    .build(),
                 Signal::builder("request-dns").build(),
                 Signal::builder("request-hostname-change")
                     .param_types([String::static_type()])
@@ -233,6 +248,18 @@ impl ClientRow {
             .as_mut()
             .expect("client object")
             .set_property("fingerprint", fingerprint);
+    }
+
+    pub(super) fn set_clipboard(&self, clipboard: bool) {
+        let handler = self.clipboard_handler.borrow();
+        let handler = handler.as_ref().expect("signal handler");
+        self.clipboard_switch.block_signal(handler);
+        self.client_object
+            .borrow_mut()
+            .as_mut()
+            .expect("client object")
+            .set_clipboard(clipboard);
+        self.clipboard_switch.unblock_signal(handler);
     }
 
     pub(super) fn set_dns_state(&self, resolved: bool) {

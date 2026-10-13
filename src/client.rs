@@ -47,6 +47,7 @@ impl ClientManager {
             cmd: config_client.enter_hook,
             leave_cmd: config_client.leave_hook,
             fingerprint: config_client.fingerprint,
+            clipboard: config_client.clipboard,
         };
         let state = ClientState {
             active: config_client.active,
@@ -290,6 +291,18 @@ impl ClientManager {
         match self.clients.borrow_mut().get_mut(handle as usize) {
             Some((c, _)) if c.fingerprint != fingerprint => {
                 c.fingerprint = fingerprint;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// enable or disable clipboard sharing with the client
+    /// returns true, if the setting changed
+    pub(crate) fn set_clipboard(&self, handle: ClientHandle, clipboard: bool) -> bool {
+        match self.clients.borrow_mut().get_mut(handle as usize) {
+            Some((c, _)) if c.clipboard != clipboard => {
+                c.clipboard = clipboard;
                 true
             }
             _ => false,

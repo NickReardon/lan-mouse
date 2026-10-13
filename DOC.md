@@ -80,8 +80,9 @@ Windows and macOS synchronize text on control switches unless
 TLS-over-TCP listener on the input listener's port number. TLS 1.3 requires a
 client certificate from `authorized_fingerprints`. Outgoing requests require the
 destination to present the certificate pinned for that client (see "Peer
-authentication"); a client without a pin is skipped. Changing or clearing a pin
-cancels a transfer already in flight. Handshake signatures are verified
+authentication"); a client without a pin, or with `clipboard = false` (the GTK
+"share clipboard" switch), is skipped. Changing or clearing a pin, or turning a
+client's sharing off, cancels a transfer already in flight. Handshake signatures are verified
 by rustls. ALPN is `lan-mouse-clipboard/1`. This channel does not depend on DTLS
 server-certificate verification and does not change the existing input protocol.
 
