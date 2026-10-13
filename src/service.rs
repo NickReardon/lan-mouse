@@ -745,6 +745,10 @@ impl Service {
             .set_fingerprint(handle, fingerprint.clone())
         {
             self.last_rejection.remove(&handle);
+            // a transfer in flight was authenticated against the old pin
+            if let Some(clipboard) = &mut self.clipboard {
+                clipboard.cancel();
+            }
             match &fingerprint {
                 Some(fp) => log::info!("client {handle}: pinned certificate fingerprint {fp}"),
                 None => log::info!("client {handle}: cleared pinned certificate fingerprint"),

@@ -75,11 +75,13 @@ sequenceDiagram
 
 ## Clipboard protocol v1
 
-Windows and macOS support opt-in text synchronization on control switches.
-The service starts a separate TLS-over-TCP listener on the input listener's port
-number when `[clipboard] mode = "on-switch"`. TLS 1.3 requires a client certificate
-from `authorized_fingerprints`; outgoing requests pin the destination's complete
-certificate fingerprint from `clipboard.peers`. Handshake signatures are verified
+Windows and macOS synchronize text on control switches unless
+`[clipboard] mode = "off"`. The default, `"on-switch"`, starts a separate
+TLS-over-TCP listener on the input listener's port number. TLS 1.3 requires a
+client certificate from `authorized_fingerprints`. Outgoing requests require the
+destination to present the certificate pinned for that client (see "Peer
+authentication"); a client without a pin is skipped. Changing or clearing a pin
+cancels a transfer already in flight. Handshake signatures are verified
 by rustls. ALPN is `lan-mouse-clipboard/1`. This channel does not depend on DTLS
 server-certificate verification and does not change the existing input protocol.
 
@@ -118,7 +120,8 @@ new version and ALPN identifier. Clipboard contents must not appear in logs.
 
 ### Manual clipboard verification
 
-Run a Windows/macOS pair with clipboard sharing enabled and fingerprints pinned.
+Run a Windows/macOS pair with clipboard sharing on (the default), with each
+side's client pinned and each controller authorized on the other side.
 Test both Windows-controlled-Mac and Mac-controlled-Windows configurations:
 
 1. Copy ASCII, multiline text, Unicode, and emoji; switch and paste through both
@@ -130,7 +133,8 @@ Test both Windows-controlled-Mac and Mac-controlled-Windows configurations:
    newer clipboard changes and input remains responsive.
 4. Try images, files, an empty clipboard, and text above 1 MiB. Verify unsupported
    content leaves the destination untouched and errors contain no clipboard text.
-5. Try an unauthorized controller, a wrong destination pin, and an older peer.
+5. Try an unauthorized controller, a regenerated destination certificate (the
+   pin no longer matches), and an older peer.
    Clipboard transfer must fail without leaking contents or preventing ordinary
    input sharing. Verify held modifiers release normally on disconnect.
 

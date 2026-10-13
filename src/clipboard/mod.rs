@@ -1,4 +1,7 @@
-//! Opt-in, on-switch text sharing (NickReardon/lan-mouse#1).
+//! On-switch text sharing (NickReardon/lan-mouse#1), enabled unless
+//! `[clipboard] mode = "off"`. Destinations are authenticated by the
+//! certificate pinned for the client (#36), sources by
+//! `[authorized_fingerprints]`.
 mod platform;
 mod protocol;
 mod tls;
@@ -32,8 +35,8 @@ const TRANSFER_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Mode {
-    #[default]
     Off,
+    #[default]
     OnSwitch,
 }
 
@@ -41,12 +44,21 @@ pub(crate) enum Mode {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Settings {
     pub mode: Mode,
-    /// Configured client hostname (or IP) -> expected certificate fingerprint.
-    pub peers: HashMap<String, String>,
+}
+
+/// Why no clipboard transfer is made for a client.
+#[derive(Debug, PartialEq, Eq)]
+enum Skip {
+    /// no certificate pinned yet, so the destination cannot be authenticated
+    Unpinned,
+}
+
+/// The certificate fingerprint a transfer to this client must present.
+fn destination(config: &ClientConfig) -> Result<&str, Skip> {
+    config.fingerprint.as_deref().ok_or(Skip::Unpinned)
 }
 
 pub(crate) struct Clipboard {
-    settings: Settings,
     cert: Certificate,
     epoch: Arc<AtomicU64>,
     worker: ClipboardWorker,
@@ -64,6 +76,11 @@ impl Clipboard {
         authorized: tls::Authorized,
     ) -> io::Result<Option<Self>> {
         if settings.mode == Mode::Off {
+            return Ok(None);
+        }
+        // on by default, so an unsupported platform is not a warning
+        if !cfg!(any(windows, target_os = "macos")) {
+            log::info!("clipboard sharing is not supported on this platform");
             return Ok(None);
         }
         let epoch = Arc::new(AtomicU64::new(0));
@@ -86,7 +103,6 @@ impl Clipboard {
         ));
         log::info!("on-switch clipboard sharing listening on TCP port {port}");
         Ok(Some(Self {
-            settings,
             cert,
             epoch,
             worker,
@@ -109,18 +125,14 @@ impl Clipboard {
         let Some(addr) = state.active_addr else {
             return;
         };
-        let fingerprint = config
-            .hostname
-            .as_ref()
-            .and_then(|name| self.settings.peers.get(name))
-            .or_else(|| self.settings.peers.get(&addr.ip().to_string()));
-        let Some(fingerprint) = fingerprint else {
-            log::warn!(
-                "clipboard sharing skipped for {addr}: configure its fingerprint in clipboard.peers"
-            );
-            return;
+        let fingerprint = match destination(config) {
+            Ok(fingerprint) => fingerprint.to_owned(),
+            Err(Skip::Unpinned) => {
+                log::info!("clipboard sharing skipped for {addr}: no certificate pinned yet");
+                return;
+            }
         };
-        let config = match tls::client(&self.cert, fingerprint.clone()) {
+        let config = match tls::client(&self.cert, fingerprint) {
             Ok(config) => config,
             Err(error) => {
                 log::warn!("clipboard TLS configuration failed: {error}");
@@ -507,12 +519,41 @@ mod tests {
     #[test]
     fn only_supported_modes_are_accepted() {
         assert_eq!(
+            toml::from_str::<Settings>("mode = 'off'").unwrap().mode,
+            Mode::Off
+        );
+        assert_eq!(
             toml::from_str::<Settings>("mode = 'on-switch'")
                 .unwrap()
                 .mode,
             Mode::OnSwitch
         );
-        assert_eq!(Settings::default().mode, Mode::Off);
         assert!(toml::from_str::<Settings>("mode = 'continuous'").is_err());
+    }
+
+    #[test]
+    fn sharing_is_on_unless_turned_off() {
+        assert_eq!(Settings::default().mode, Mode::OnSwitch);
+        assert_eq!(toml::from_str::<Settings>("").unwrap().mode, Mode::OnSwitch);
+    }
+
+    #[test]
+    fn separate_peer_pins_are_rejected() {
+        // destinations are authenticated by the client's pinned certificate
+        assert!(
+            toml::from_str::<Settings>(
+                "[peers]
+host = 'aa'"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn destination_is_the_pinned_certificate() {
+        let mut config = ClientConfig::default();
+        assert_eq!(destination(&config), Err(Skip::Unpinned));
+        config.fingerprint = Some("ab".repeat(32));
+        assert_eq!(destination(&config), Ok("ab".repeat(32).as_str()));
     }
 }
