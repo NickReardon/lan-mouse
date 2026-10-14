@@ -582,6 +582,7 @@ configuration file.
 ```toml
 [clipboard]
 mode = "off" # default: "on-switch"
+# max_size_mib = 4 # default: 1, at most 16
 ```
 
 Clipboard transfers use a separate, mutually authenticated TLS 1.3 connection on
@@ -590,7 +591,10 @@ that TCP port through the destination's firewall. A destination presenting a
 certificate other than the pinned one is refused and reported in the daemon log.
 Older peers keep input sharing but cannot exchange clipboards.
 
-Only plain text up to **1 MiB of UTF-8** is transferred. Images, files, formatting,
+Only plain text is transferred, up to **1 MiB of UTF-8** by default. Raise the
+limit with `max_size_mib` (1 to 16) in the `[clipboard]` table, set to the same
+value on both computers: a receiver refuses text above its own limit, and
+larger text is skipped with a warning in the daemon log. Images, files, formatting,
 and empty/non-text clipboards do not clear the destination's existing clipboard.
 New local clipboard changes during a received transfer take precedence, and
 superseded switch tasks are cancelled. Transfers time out after five seconds;

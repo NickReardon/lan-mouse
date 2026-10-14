@@ -118,7 +118,10 @@ Each TCP connection carries one request. Integers use network byte order:
 | Push response | One byte: 1 = applied, 0 = skipped |
 
 Receivers reject unsupported versions/operations, malformed UTF-8, truncated
-frames, and lengths above 1 MiB before allocating a payload buffer. Empty text
+frames, and lengths above their limit before allocating a payload buffer. The
+limit is `[clipboard] max_size_mib`, 1 MiB by default and at most 16 MiB so a
+transfer fits the five-second timeout. Senders skip text above their own limit,
+so peers should use the same value. Empty text
 is a valid frame; an OS clipboard without text uses the absent marker. Requests
 have a five-second timeout, at most eight inbound tasks, and a bounded worker
 queue. Request ordering tracks at most 128 peer identities and 64 retired

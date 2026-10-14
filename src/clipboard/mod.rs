@@ -8,7 +8,9 @@ mod tls;
 
 use lan_mouse_ipc::{ClientConfig, ClientState};
 use platform::ClipboardWorker;
-use protocol::{PULL, PUSH, invalid, read_header, read_text, write_header, write_text};
+use protocol::{
+    DEFAULT_MAX_TEXT, MIB, PULL, PUSH, invalid, read_header, read_text, write_header, write_text,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
@@ -40,10 +42,33 @@ pub(crate) enum Mode {
     OnSwitch,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// Largest allowed `max_size_mib`: a transfer must finish within
+/// `TRANSFER_TIMEOUT`.
+const MAX_SIZE_MIB: u32 = 16;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Settings {
     pub mode: Mode,
+    /// largest text sent or accepted, in MiB (1 to 16); peers need the
+    /// same value, a receiver refuses anything above its own limit
+    pub max_size_mib: u32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            mode: Mode::default(),
+            max_size_mib: (DEFAULT_MAX_TEXT / MIB) as u32,
+        }
+    }
+}
+
+impl Settings {
+    /// the size limit in bytes, with `max_size_mib` kept within 1 to 16
+    fn max_text(&self) -> usize {
+        self.max_size_mib.clamp(1, MAX_SIZE_MIB) as usize * MIB
+    }
 }
 
 /// Why no clipboard transfer is made for a client.
@@ -70,6 +95,7 @@ pub(crate) struct Clipboard {
     session: [u8; 16],
     sequence: u64,
     synced: Synced,
+    max_text: usize,
     listener: JoinHandle<()>,
     transfer: Option<JoinHandle<()>>,
 }
@@ -88,6 +114,14 @@ impl Clipboard {
         if !cfg!(any(windows, target_os = "macos")) {
             log::info!("clipboard sharing is not supported on this platform");
             return Ok(None);
+        }
+        let max_text = settings.max_text();
+        if max_text != settings.max_size_mib as usize * MIB {
+            log::warn!(
+                "clipboard max_size_mib = {} is outside 1 to {MAX_SIZE_MIB}, using {} MiB",
+                settings.max_size_mib,
+                max_text / MIB
+            );
         }
         let epoch = Arc::new(AtomicU64::new(0));
         let worker = ClipboardWorker::new(epoch.clone())?;
@@ -109,6 +143,7 @@ impl Clipboard {
             worker.clone(),
             epoch.clone(),
             synced.clone(),
+            max_text,
         ));
         log::info!("on-switch clipboard sharing listening on TCP port {port}");
         Ok(Some(Self {
@@ -118,6 +153,7 @@ impl Clipboard {
             session,
             sequence: 0,
             synced,
+            max_text,
             listener,
             transfer: None,
         }))
@@ -158,6 +194,7 @@ impl Clipboard {
         let sequence = self.sequence;
         let session = self.session;
         let synced = self.synced.clone();
+        let max_text = self.max_text;
         self.transfer = Some(tokio::task::spawn_local(async move {
             let transfer = exchange(
                 TcpStream::connect(addr),
@@ -169,6 +206,7 @@ impl Clipboard {
                 sequence,
                 returning,
                 (&synced, &fingerprint),
+                max_text,
             );
             match timeout(TRANSFER_TIMEOUT, transfer).await {
                 Ok(Ok(())) => log::debug!("clipboard switch transfer completed with {addr}"),
@@ -271,6 +309,7 @@ async fn serve(
     worker: ClipboardWorker,
     epoch: Arc<AtomicU64>,
     synced: Synced,
+    max_text: usize,
 ) {
     let permits = Arc::new(Semaphore::new(8));
     let orders: Orders = Default::default();
@@ -284,7 +323,7 @@ async fn serve(
                 let expected = epoch.load(Ordering::SeqCst);
                 tasks.spawn_local(async move {
                     let _permit = permit;
-                    let result = timeout(TRANSFER_TIMEOUT, receive(stream, acceptor, authorized, worker, epoch, orders, synced, expected)).await;
+                    let result = timeout(TRANSFER_TIMEOUT, receive(stream, acceptor, authorized, worker, epoch, orders, synced, expected, max_text)).await;
                     if let Ok(Err(error)) = result { log::debug!("clipboard request from {addr} rejected: {error}"); }
                 });
             },
@@ -303,6 +342,7 @@ async fn receive(
     orders: Orders,
     synced: Synced,
     expected: u64,
+    max_text: usize,
 ) -> io::Result<()> {
     let mut stream = acceptor.accept(socket).await?;
     let cert = stream
@@ -344,11 +384,11 @@ async fn receive(
         } else {
             snapshot.text.as_deref()
         };
-        write_text(&mut stream, text).await?;
+        write_text(&mut stream, text, max_text).await?;
         synced.record(&fingerprint, snapshot.revision);
     } else {
         let revision = worker.revision().await?;
-        let text = read_text(&mut stream).await?;
+        let text = read_text(&mut stream, max_text).await?;
         let orders = orders.lock().await;
         let mut applied = false;
         if orders
@@ -379,6 +419,7 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     sequence: u64,
     returning: bool,
     (synced, peer): (&Synced, &str),
+    max_text: usize,
 ) -> io::Result<()> {
     let revision = worker.revision().await?;
     let snapshot = if returning {
@@ -407,7 +448,7 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     .await?;
     if returning {
         stream.flush().await?;
-        if let Some(text) = read_text(&mut stream)
+        if let Some(text) = read_text(&mut stream, max_text)
             .await?
             .filter(|text| !text.is_empty())
         {
@@ -421,7 +462,7 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
         {
             return Ok(());
         }
-        write_text(&mut stream, snapshot.text.as_deref()).await?;
+        write_text(&mut stream, snapshot.text.as_deref(), max_text).await?;
         stream.flush().await?;
         let _applied = stream.read_u8().await?;
         synced.record(peer, snapshot.revision);
@@ -529,6 +570,7 @@ mod tests {
                 from.next_sequence(),
                 returning,
                 (&from.synced, &to.fingerprint),
+                DEFAULT_MAX_TEXT,
             ),
             receive(
                 server,
@@ -538,7 +580,8 @@ mod tests {
                 to.epoch.clone(),
                 to.orders.clone(),
                 to.synced.clone(),
-                0
+                0,
+                DEFAULT_MAX_TEXT
             ),
         );
         sent.unwrap();
@@ -643,6 +686,7 @@ mod tests {
                 1,
                 true,
                 (&windows.synced, &mac.fingerprint),
+                DEFAULT_MAX_TEXT,
             ),
             receive(
                 server,
@@ -652,7 +696,8 @@ mod tests {
                 mac.epoch.clone(),
                 mac.orders.clone(),
                 mac.synced.clone(),
-                0
+                0,
+                DEFAULT_MAX_TEXT
             ),
         );
         received.unwrap();
@@ -691,6 +736,15 @@ mod tests {
     fn sharing_is_on_unless_turned_off() {
         assert_eq!(Settings::default().mode, Mode::OnSwitch);
         assert_eq!(toml::from_str::<Settings>("").unwrap().mode, Mode::OnSwitch);
+    }
+
+    #[test]
+    fn size_limit_defaults_to_one_mib_and_stays_in_range() {
+        assert_eq!(Settings::default().max_text(), MIB);
+        let settings = |toml: &str| toml::from_str::<Settings>(toml).unwrap();
+        assert_eq!(settings("max_size_mib = 8").max_text(), 8 * MIB);
+        assert_eq!(settings("max_size_mib = 0").max_text(), MIB);
+        assert_eq!(settings("max_size_mib = 999").max_text(), 16 * MIB);
     }
 
     #[test]

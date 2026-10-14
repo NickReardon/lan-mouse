@@ -180,13 +180,15 @@ fn read() -> io::Result<Snapshot> {
             continue;
         }
         match result {
-            Ok(text) if text.len() <= super::protocol::MAX_TEXT => {
+            // the configured limit is applied when sending; this only
+            // bounds what is read at all
+            Ok(text) if text.len() <= super::MAX_SIZE_MIB as usize * super::protocol::MIB => {
                 return Ok(Snapshot {
                     text: Some(text),
                     revision,
                 });
             }
-            Ok(_) => return Err(io::Error::other("clipboard text exceeds 1 MiB")),
+            Ok(_) => return Err(io::Error::other("clipboard text exceeds 16 MiB")),
             Err(arboard::Error::ContentNotAvailable) => {
                 return Ok(Snapshot {
                     text: None,

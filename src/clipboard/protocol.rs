@@ -2,7 +2,9 @@
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub(super) const MAX_TEXT: usize = 1024 * 1024;
+pub(super) const MIB: usize = 1024 * 1024;
+/// size limit when `[clipboard] max_size_mib` is not set
+pub(super) const DEFAULT_MAX_TEXT: usize = MIB;
 const MAGIC: &[u8; 8] = b"LMCLIP01";
 pub(super) const PUSH: u8 = 1;
 pub(super) const PULL: u8 = 2;
@@ -39,12 +41,13 @@ pub(super) async fn read_header(
 pub(super) async fn write_text(
     stream: &mut (impl AsyncWrite + Unpin),
     text: Option<&str>,
+    max: usize,
 ) -> io::Result<()> {
     match text {
         None => stream.write_u32(u32::MAX).await,
         Some(text) => {
-            if text.len() > MAX_TEXT {
-                return Err(invalid("clipboard text exceeds 1 MiB"));
+            if text.len() > max {
+                return Err(too_large(max));
             }
             stream.write_u32(text.len() as u32).await?;
             stream.write_all(text.as_bytes()).await
@@ -52,13 +55,17 @@ pub(super) async fn write_text(
     }
 }
 
-pub(super) async fn read_text(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Option<String>> {
+pub(super) async fn read_text(
+    stream: &mut (impl AsyncRead + Unpin),
+    max: usize,
+) -> io::Result<Option<String>> {
     let len = stream.read_u32().await?;
     if len == u32::MAX {
         return Ok(None);
     }
-    if len as usize > MAX_TEXT {
-        return Err(invalid("clipboard text exceeds 1 MiB"));
+    // checked before allocating: the length is chosen by the peer
+    if len as usize > max {
+        return Err(too_large(max));
     }
     let mut data = vec![0; len as usize];
     stream.read_exact(&mut data).await?;
@@ -71,6 +78,10 @@ pub(super) fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+fn too_large(max: usize) -> io::Error {
+    invalid(&format!("clipboard text exceeds {} MiB", max / MIB))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,33 +91,61 @@ mod tests {
         for text in [Some("Hello\r\n世界 🐭"), Some(""), None] {
             let mut wire = Vec::new();
             write_header(&mut wire, PUSH, [7; 16], 42).await.unwrap();
-            write_text(&mut wire, text).await.unwrap();
+            write_text(&mut wire, text, DEFAULT_MAX_TEXT).await.unwrap();
             let mut input = wire.as_slice();
             assert_eq!(read_header(&mut input).await.unwrap(), (PUSH, [7; 16], 42));
-            assert_eq!(read_text(&mut input).await.unwrap().as_deref(), text);
+            assert_eq!(
+                read_text(&mut input, DEFAULT_MAX_TEXT)
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                text
+            );
         }
     }
 
     #[tokio::test]
     async fn rejects_oversized_truncated_invalid_and_unknown_messages() {
-        let len = (MAX_TEXT as u32 + 1).to_be_bytes();
-        assert!(read_text(&mut len.as_slice()).await.is_err());
+        let max = DEFAULT_MAX_TEXT;
+        let len = (max as u32 + 1).to_be_bytes();
+        assert!(read_text(&mut len.as_slice(), max).await.is_err());
         assert!(
-            write_text(&mut Vec::new(), Some(&"x".repeat(MAX_TEXT + 1)))
+            write_text(&mut Vec::new(), Some(&"x".repeat(max + 1)), max)
                 .await
                 .is_err()
         );
-        assert!(read_text(&mut b"\0\0\0\x02x".as_slice()).await.is_err());
-        assert!(read_text(&mut b"\0\0\0\x01\xff".as_slice()).await.is_err());
+        assert!(
+            read_text(&mut b"\0\0\0\x02x".as_slice(), max)
+                .await
+                .is_err()
+        );
+        assert!(
+            read_text(&mut b"\0\0\0\x01\xff".as_slice(), max)
+                .await
+                .is_err()
+        );
         assert!(read_header(&mut b"LMCLIP02".as_slice()).await.is_err());
         assert!(read_header(&mut b"LMCLIP01\xff".as_slice()).await.is_err());
     }
 
     #[tokio::test]
     async fn accepts_exact_payload_limit() {
-        let text = "x".repeat(MAX_TEXT);
-        let mut wire = Vec::new();
-        write_text(&mut wire, Some(&text)).await.unwrap();
-        assert_eq!(read_text(&mut wire.as_slice()).await.unwrap(), Some(text));
+        for max in [DEFAULT_MAX_TEXT, 4 * MIB] {
+            let text = "x".repeat(max);
+            let mut wire = Vec::new();
+            write_text(&mut wire, Some(&text), max).await.unwrap();
+            assert_eq!(
+                read_text(&mut wire.as_slice(), max).await.unwrap(),
+                Some(text)
+            );
+            // a smaller limit on the other side refuses it
+            if max > DEFAULT_MAX_TEXT {
+                assert!(
+                    read_text(&mut wire.as_slice(), DEFAULT_MAX_TEXT)
+                        .await
+                        .is_err()
+                );
+            }
+        }
     }
 }
