@@ -193,6 +193,9 @@ impl Drop for Clipboard {
 struct UpdateOrder {
     current: Option<([u8; 16], u64)>,
     retired: VecDeque<[u8; 16]>,
+    /// clipboard revision when this peer last took control of us; a pull
+    /// on its return only gets text copied here since then
+    entered: Option<u64>,
 }
 
 impl UpdateOrder {
@@ -293,19 +296,34 @@ async fn receive(
         if !tls::authorized(&authorized, &cert) || epoch.load(Ordering::SeqCst) != expected {
             return Err(invalid("clipboard client authorization revoked"));
         }
-        write_text(&mut stream, snapshot.text.as_deref()).await?;
+        // nothing copied here while the peer had control: keep its clipboard
+        let unchanged = orders
+            .lock()
+            .await
+            .get(&fingerprint)
+            .and_then(|order| order.entered)
+            == Some(snapshot.revision);
+        let text = if unchanged {
+            None
+        } else {
+            snapshot.text.as_deref()
+        };
+        write_text(&mut stream, text).await?;
     } else {
         let revision = worker.revision().await?;
         let text = read_text(&mut stream).await?;
-        let orders = orders.lock().await;
+        let mut orders = orders.lock().await;
         let mut applied = false;
-        if orders
-            .get(&fingerprint)
-            .is_some_and(|order| order.is_current(session, sequence))
-            && tls::authorized(&authorized, &cert)
+        if let Some(order) = orders
+            .get_mut(&fingerprint)
+            .filter(|order| order.is_current(session, sequence))
         {
-            if let Some(text) = text.filter(|text| !text.is_empty()) {
-                applied = worker.write(text, revision, expected).await?;
+            if tls::authorized(&authorized, &cert) {
+                if let Some(text) = text.filter(|text| !text.is_empty()) {
+                    applied = worker.write(text, revision, expected).await?;
+                }
+                // read after our own write, so it is not taken for a copy
+                order.entered = Some(worker.revision().await?);
             }
         }
         stream.write_u8(u8::from(applied)).await?;
@@ -511,6 +529,71 @@ mod tests {
             Some("new local copy")
         );
     }
+    /// Push on entry, then pull on return, over one listener's state.
+    async fn enter_and_return(
+        controller: &ClipboardWorker,
+        remote: &ClipboardWorker,
+        copy_on_remote: Option<&str>,
+    ) {
+        let epoch = Arc::new(AtomicU64::new(0));
+        let (acceptor, connector, keys) = connections();
+        let orders: Orders = Default::default();
+        for returning in [false, true] {
+            if returning {
+                if let Some(text) = copy_on_remote {
+                    let revision = remote.revision().await.unwrap();
+                    remote.write(text.into(), revision, 0).await.unwrap();
+                }
+            }
+            let (client, server) = tokio::io::duplex(4096);
+            let (received, sent) = tokio::join!(
+                receive(
+                    server,
+                    acceptor.clone(),
+                    keys.clone(),
+                    remote.clone(),
+                    epoch.clone(),
+                    orders.clone(),
+                    0
+                ),
+                exchange(
+                    async { Ok(client) },
+                    connector.clone(),
+                    controller.clone(),
+                    epoch.clone(),
+                    0,
+                    [1; 16],
+                    if returning { 2 } else { 1 },
+                    returning
+                ),
+            );
+            received.unwrap();
+            sent.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn return_without_a_remote_copy_keeps_the_controller_clipboard() {
+        // e.g. a screenshot: no text to send on entry
+        let epoch = Arc::new(AtomicU64::new(0));
+        let controller = ClipboardWorker::memory(None, epoch.clone());
+        let remote = ClipboardWorker::memory(Some("stale remote text"), epoch);
+        enter_and_return(&controller, &remote, None).await;
+        assert_eq!(controller.read().await.unwrap().text, None);
+    }
+
+    #[tokio::test]
+    async fn return_brings_back_text_copied_on_the_remote() {
+        let epoch = Arc::new(AtomicU64::new(0));
+        let controller = ClipboardWorker::memory(None, epoch.clone());
+        let remote = ClipboardWorker::memory(Some("stale remote text"), epoch);
+        enter_and_return(&controller, &remote, Some("copied on the remote")).await;
+        assert_eq!(
+            controller.read().await.unwrap().text.as_deref(),
+            Some("copied on the remote")
+        );
+    }
+
     #[test]
     fn old_duplicate_and_retired_updates_cannot_win() {
         let mut order = UpdateOrder::default();
