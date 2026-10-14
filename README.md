@@ -553,10 +553,13 @@ Where `left` can be either `left`, `right`, `top` or `bottom`.
 
 Plain text can be shared when control switches between computers. Copy text,
 move control to the other computer, and paste using its normal shortcut or menu.
-When returning control (including with the release bind), the controller fetches
-text copied on the other computer during that visit. If nothing was copied
-there, the controller keeps its own clipboard, including images such as a
-screenshot. Transfers run in the background; a paste made immediately
+When returning control (by the screen edge or with the release bind), text
+copied on the other computer during that visit comes back.
+
+Only text copied **since the last switch** is sent, counting Lan Mouse's start as
+a switch. Moving back and forth without copying never replaces the other
+computer's clipboard. A screenshot or other non-text clipboard is kept, and so
+is text copied before Lan Mouse started. Transfers run in the background; a paste made immediately
 after switching can still see the previous clipboard until the transfer finishes.
 
 Clipboard sharing is **on by default** whenever both computers run a version

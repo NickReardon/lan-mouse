@@ -87,12 +87,21 @@ by rustls. ALPN is `lan-mouse-clipboard/1`. This channel does not depend on DTLS
 server-certificate verification and does not change the existing input protocol.
 
 After an input peer acknowledges entry, the controller sends a fresh clipboard
-snapshot. On release, it requests the remote clipboard. The receiver records its
-native clipboard generation after handling each accepted push (after its own
-write, if any) per peer identity. A pull from that peer returns the absent
-marker when the generation is unchanged, so a return without a copy on the
-receiver leaves the controller's clipboard (text or not) alone. A peer with no
-recorded push gets the current text. The wire format is unchanged. Neither operation
+snapshot. On release with the release bind, it requests the remote clipboard.
+Returning by the screen edge is the remote taking control, so it pushes instead.
+
+Each side records, per peer certificate, its native clipboard generation at the
+last switch with that peer:
+- after a push it sent, the generation it sent
+- after a push it received, the generation following its own write, if any
+- after answering a pull, the generation it answered with
+- after applying pulled text, the generation following that write
+
+A peer with no switch yet is compared with the generation at startup. A push is
+skipped, without connecting, and a pull is answered with the absent marker, when
+the generation is unchanged. So only text copied since the last switch (or since
+startup) is ever sent, and moving back and forth without copying never replaces
+the other side's clipboard, text or not. The wire format is unchanged. Neither operation
 intercepts paste shortcuts. GTK does not need to be open. A dedicated OS worker
 serializes clipboard access and performs bounded read retries on contention;
 network tasks remain independent of input capture and emulation.

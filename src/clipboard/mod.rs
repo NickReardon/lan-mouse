@@ -69,6 +69,7 @@ pub(crate) struct Clipboard {
     worker: ClipboardWorker,
     session: [u8; 16],
     sequence: u64,
+    synced: Synced,
     listener: JoinHandle<()>,
     transfer: Option<JoinHandle<()>>,
 }
@@ -90,6 +91,8 @@ impl Clipboard {
         }
         let epoch = Arc::new(AtomicU64::new(0));
         let worker = ClipboardWorker::new(epoch.clone())?;
+        // startup counts as a switch: earlier copies are never sent
+        let synced = Synced::new(worker.revision().await?);
         let acceptor = TlsAcceptor::from(Arc::new(
             tls::server(&cert, authorized.clone()).map_err(io::Error::other)?,
         ));
@@ -105,6 +108,7 @@ impl Clipboard {
             authorized,
             worker.clone(),
             epoch.clone(),
+            synced.clone(),
         ));
         log::info!("on-switch clipboard sharing listening on TCP port {port}");
         Ok(Some(Self {
@@ -113,6 +117,7 @@ impl Clipboard {
             worker,
             session,
             sequence: 0,
+            synced,
             listener,
             transfer: None,
         }))
@@ -138,7 +143,7 @@ impl Clipboard {
                 return;
             }
         };
-        let config = match tls::client(&self.cert, fingerprint) {
+        let config = match tls::client(&self.cert, fingerprint.clone()) {
             Ok(config) => config,
             Err(error) => {
                 log::warn!("clipboard TLS configuration failed: {error}");
@@ -152,6 +157,7 @@ impl Clipboard {
         self.sequence += 1;
         let sequence = self.sequence;
         let session = self.session;
+        let synced = self.synced.clone();
         self.transfer = Some(tokio::task::spawn_local(async move {
             let transfer = exchange(
                 TcpStream::connect(addr),
@@ -162,6 +168,7 @@ impl Clipboard {
                 session,
                 sequence,
                 returning,
+                (&synced, &fingerprint),
             );
             match timeout(TRANSFER_TIMEOUT, transfer).await {
                 Ok(Ok(())) => log::debug!("clipboard switch transfer completed with {addr}"),
@@ -193,9 +200,6 @@ impl Drop for Clipboard {
 struct UpdateOrder {
     current: Option<([u8; 16], u64)>,
     retired: VecDeque<[u8; 16]>,
-    /// clipboard revision when this peer last took control of us; a pull
-    /// on its return only gets text copied here since then
-    entered: Option<u64>,
 }
 
 impl UpdateOrder {
@@ -225,12 +229,48 @@ impl UpdateOrder {
 
 type Orders = Arc<Mutex<HashMap<String, UpdateOrder>>>;
 
+/// This machine's clipboard revision at the last switch with each peer,
+/// keyed by the peer's certificate fingerprint. Text goes to a peer, on
+/// entry or in answer to its pull, only if something was copied here since,
+/// so a switch never replaces the peer's newer clipboard (for example a
+/// screenshot) with stale text. A peer without a switch yet is compared
+/// with the revision at startup.
+#[derive(Clone)]
+struct Synced {
+    startup: u64,
+    peers: Arc<std::sync::Mutex<HashMap<String, u64>>>,
+}
+
+impl Synced {
+    fn new(startup: u64) -> Self {
+        Self {
+            startup,
+            peers: Default::default(),
+        }
+    }
+
+    /// whether nothing was copied here since the last switch with `peer`
+    fn unchanged(&self, peer: &str, revision: u64) -> bool {
+        let peers = self.peers.lock().expect("lock");
+        peers.get(peer).copied().unwrap_or(self.startup) == revision
+    }
+
+    fn record(&self, peer: &str, revision: u64) {
+        let mut peers = self.peers.lock().expect("lock");
+        // peers are pinned or authorized, but still bound memory
+        if peers.len() < 128 || peers.contains_key(peer) {
+            peers.insert(peer.to_owned(), revision);
+        }
+    }
+}
+
 async fn serve(
     socket: TcpListener,
     acceptor: TlsAcceptor,
     authorized: tls::Authorized,
     worker: ClipboardWorker,
     epoch: Arc<AtomicU64>,
+    synced: Synced,
 ) {
     let permits = Arc::new(Semaphore::new(8));
     let orders: Orders = Default::default();
@@ -240,11 +280,11 @@ async fn serve(
             connection = socket.accept() => {
                 let (stream, addr) = match connection { Ok(connection) => connection, Err(error) => { log::warn!("clipboard listener failed: {error}"); break; } };
                 let Ok(permit) = permits.clone().try_acquire_owned() else { continue; };
-                let (acceptor, authorized, worker, epoch, orders) = (acceptor.clone(), authorized.clone(), worker.clone(), epoch.clone(), orders.clone());
+                let (acceptor, authorized, worker, epoch, orders, synced) = (acceptor.clone(), authorized.clone(), worker.clone(), epoch.clone(), orders.clone(), synced.clone());
                 let expected = epoch.load(Ordering::SeqCst);
                 tasks.spawn_local(async move {
                     let _permit = permit;
-                    let result = timeout(TRANSFER_TIMEOUT, receive(stream, acceptor, authorized, worker, epoch, orders, expected)).await;
+                    let result = timeout(TRANSFER_TIMEOUT, receive(stream, acceptor, authorized, worker, epoch, orders, synced, expected)).await;
                     if let Ok(Err(error)) = result { log::debug!("clipboard request from {addr} rejected: {error}"); }
                 });
             },
@@ -253,6 +293,7 @@ async fn serve(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn receive(
     socket: impl AsyncRead + AsyncWrite + Unpin,
     acceptor: TlsAcceptor,
@@ -260,6 +301,7 @@ async fn receive(
     worker: ClipboardWorker,
     epoch: Arc<AtomicU64>,
     orders: Orders,
+    synced: Synced,
     expected: u64,
 ) -> io::Result<()> {
     let mut stream = acceptor.accept(socket).await?;
@@ -296,35 +338,29 @@ async fn receive(
         if !tls::authorized(&authorized, &cert) || epoch.load(Ordering::SeqCst) != expected {
             return Err(invalid("clipboard client authorization revoked"));
         }
-        // nothing copied here while the peer had control: keep its clipboard
-        let unchanged = orders
-            .lock()
-            .await
-            .get(&fingerprint)
-            .and_then(|order| order.entered)
-            == Some(snapshot.revision);
-        let text = if unchanged {
+        // nothing copied here since the switch: keep the peer's clipboard
+        let text = if synced.unchanged(&fingerprint, snapshot.revision) {
             None
         } else {
             snapshot.text.as_deref()
         };
         write_text(&mut stream, text).await?;
+        synced.record(&fingerprint, snapshot.revision);
     } else {
         let revision = worker.revision().await?;
         let text = read_text(&mut stream).await?;
-        let mut orders = orders.lock().await;
+        let orders = orders.lock().await;
         let mut applied = false;
-        if let Some(order) = orders
-            .get_mut(&fingerprint)
-            .filter(|order| order.is_current(session, sequence))
+        if orders
+            .get(&fingerprint)
+            .is_some_and(|order| order.is_current(session, sequence))
+            && tls::authorized(&authorized, &cert)
         {
-            if tls::authorized(&authorized, &cert) {
-                if let Some(text) = text.filter(|text| !text.is_empty()) {
-                    applied = worker.write(text, revision, expected).await?;
-                }
-                // read after our own write, so it is not taken for a copy
-                order.entered = Some(worker.revision().await?);
+            if let Some(text) = text.filter(|text| !text.is_empty()) {
+                applied = worker.write(text, revision, expected).await?;
             }
+            // read after our own write, so it is not taken for a copy
+            synced.record(&fingerprint, worker.revision().await?);
         }
         stream.write_u8(u8::from(applied)).await?;
     }
@@ -342,6 +378,7 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     session: [u8; 16],
     sequence: u64,
     returning: bool,
+    (synced, peer): (&Synced, &str),
 ) -> io::Result<()> {
     let revision = worker.revision().await?;
     let snapshot = if returning {
@@ -349,6 +386,12 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     } else {
         Some(worker.read().await?)
     };
+    if let Some(snapshot) = &snapshot {
+        if synced.unchanged(peer, snapshot.revision) {
+            log::debug!("nothing copied since the last switch, clipboard not sent");
+            return Ok(());
+        }
+    }
     let socket = socket.await?;
     let name = rustls::pki_types::ServerName::try_from("ignored").expect("static server name");
     let mut stream = connector.connect(name, socket).await?;
@@ -368,7 +411,9 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
             .await?
             .filter(|text| !text.is_empty())
         {
-            worker.write(text, revision, expected).await?;
+            if worker.write(text, revision, expected).await? {
+                synced.record(peer, worker.revision().await?);
+            }
         }
     } else {
         let snapshot = snapshot.expect("outgoing clipboard snapshot");
@@ -379,6 +424,7 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
         write_text(&mut stream, snapshot.text.as_deref()).await?;
         stream.flush().await?;
         let _applied = stream.read_u8().await?;
+        synced.record(peer, snapshot.revision);
     }
     Ok(())
 }
@@ -386,212 +432,232 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
-    fn connections() -> (TlsAcceptor, TlsConnector, tls::Authorized) {
-        let server = Certificate::generate_self_signed(vec!["ignored".into()]).unwrap();
-        let client = Certificate::generate_self_signed(vec!["ignored".into()]).unwrap();
-        let keys = Arc::new(std::sync::RwLock::new(HashMap::from([(
-            crate::crypto::certificate_fingerprint(&client),
-            "controller".into(),
-        )])));
+    /// One side of a pair: its identity, clipboard and listener state.
+    struct Machine {
+        cert: Certificate,
+        fingerprint: String,
+        keys: tls::Authorized,
+        worker: ClipboardWorker,
+        epoch: Arc<AtomicU64>,
+        synced: Synced,
+        orders: Orders,
+        session: [u8; 16],
+        sequence: Cell<u64>,
+    }
+
+    impl Machine {
+        async fn new(text: Option<&str>, session: u8) -> Self {
+            let cert = Certificate::generate_self_signed(vec!["ignored".into()]).unwrap();
+            let epoch = Arc::new(AtomicU64::new(0));
+            let worker = ClipboardWorker::memory(text, epoch.clone());
+            // as at startup: the current clipboard counts as already synced
+            let synced = Synced::new(worker.revision().await.unwrap());
+            Self {
+                fingerprint: crate::crypto::certificate_fingerprint(&cert),
+                cert,
+                keys: Default::default(),
+                worker,
+                epoch,
+                synced,
+                orders: Default::default(),
+                session: [session; 16],
+                sequence: Cell::new(0),
+            }
+        }
+
+        /// Treat the current clipboard as copied after startup.
+        fn forget_startup(&mut self) {
+            self.synced = Synced::new(u64::MAX);
+        }
+
+        async fn copy(&self, text: &str) {
+            let revision = self.worker.revision().await.unwrap();
+            assert!(self.worker.write(text.into(), revision, 0).await.unwrap());
+        }
+
+        async fn clipboard(&self) -> Option<String> {
+            self.worker.read().await.unwrap().text
+        }
+
+        fn next_sequence(&self) -> u64 {
+            self.sequence.set(self.sequence.get() + 1);
+            self.sequence.get()
+        }
+    }
+
+    /// Two machines that pin and authorize each other.
+    async fn pair(a: Option<&str>, b: Option<&str>) -> (Machine, Machine) {
+        let a = Machine::new(a, 1).await;
+        let b = Machine::new(b, 2).await;
+        a.keys
+            .write()
+            .unwrap()
+            .insert(b.fingerprint.clone(), "b".into());
+        b.keys
+            .write()
+            .unwrap()
+            .insert(a.fingerprint.clone(), "a".into());
+        (a, b)
+    }
+
+    fn link(from: &Machine, to: &Machine) -> (TlsConnector, TlsAcceptor) {
         (
-            TlsAcceptor::from(Arc::new(tls::server(&server, keys.clone()).unwrap())),
             TlsConnector::from(Arc::new(
-                tls::client(&client, crate::crypto::certificate_fingerprint(&server)).unwrap(),
+                tls::client(&from.cert, to.fingerprint.clone()).unwrap(),
             )),
-            keys,
+            TlsAcceptor::from(Arc::new(tls::server(&to.cert, to.keys.clone()).unwrap())),
         )
+    }
+
+    /// `from` takes control of `to` (`returning == false`, a push), or gives
+    /// control back to itself with the release bind (`returning == true`, a
+    /// pull from `to`). A skipped push never connects, so `to` then only sees
+    /// a closed stream.
+    async fn switch(from: &Machine, to: &Machine, returning: bool) {
+        let (connector, acceptor) = link(from, to);
+        let (client, server) = tokio::io::duplex(4096);
+        let (sent, _received) = tokio::join!(
+            exchange(
+                async { Ok(client) },
+                connector,
+                from.worker.clone(),
+                from.epoch.clone(),
+                0,
+                from.session,
+                from.next_sequence(),
+                returning,
+                (&from.synced, &to.fingerprint),
+            ),
+            receive(
+                server,
+                acceptor,
+                to.keys.clone(),
+                to.worker.clone(),
+                to.epoch.clone(),
+                to.orders.clone(),
+                to.synced.clone(),
+                0
+            ),
+        );
+        sent.unwrap();
     }
 
     #[tokio::test]
     async fn encrypted_entry_and_return_share_unicode_in_both_directions() {
-        let epoch = Arc::new(AtomicU64::new(0));
-        let controller = ClipboardWorker::memory(Some("Windows → Mac 🐭"), epoch.clone());
-        let remote = ClipboardWorker::memory(Some("old clipboard"), epoch.clone());
-        let (acceptor, connector, keys) = connections();
-        let orders: Orders = Default::default();
-        for returning in [false, true] {
-            if returning {
-                let revision = remote.revision().await.unwrap();
-                remote
-                    .write("Mac → Windows 世界".into(), revision, 0)
-                    .await
-                    .unwrap();
-            }
-            let (client, server) = tokio::io::duplex(4096);
-            let (received, sent) = tokio::join!(
-                receive(
-                    server,
-                    acceptor.clone(),
-                    keys.clone(),
-                    remote.clone(),
-                    epoch.clone(),
-                    orders.clone(),
-                    0
-                ),
-                exchange(
-                    async { Ok(client) },
-                    connector.clone(),
-                    controller.clone(),
-                    epoch.clone(),
-                    0,
-                    [1; 16],
-                    if returning { 2 } else { 1 },
-                    returning
-                ),
-            );
-            received.unwrap();
-            sent.unwrap();
-            assert_eq!(
-                controller.read().await.unwrap().text,
-                remote.read().await.unwrap().text
-            );
-        }
+        let (windows, mac) = pair(Some("old"), Some("old clipboard")).await;
+        windows.copy("Windows → Mac 🐭").await;
+        switch(&windows, &mac, false).await;
+        assert_eq!(mac.clipboard().await.as_deref(), Some("Windows → Mac 🐭"));
+        mac.copy("Mac → Windows 世界").await;
+        switch(&windows, &mac, true).await;
+        assert_eq!(
+            windows.clipboard().await.as_deref(),
+            Some("Mac → Windows 世界")
+        );
+    }
+
+    #[tokio::test]
+    async fn screenshot_survives_a_return_by_screen_edge() {
+        // a screenshot: no text on Windows, stale text on the Mac
+        let (windows, mac) = pair(None, Some("stale mac text")).await;
+        switch(&windows, &mac, false).await;
+        // crossing back by the edge is the Mac taking control of Windows
+        switch(&mac, &windows, false).await;
+        assert_eq!(windows.clipboard().await, None);
+    }
+
+    #[tokio::test]
+    async fn screenshot_survives_a_return_by_release_bind() {
+        let (windows, mac) = pair(None, Some("stale mac text")).await;
+        switch(&windows, &mac, false).await;
+        switch(&windows, &mac, true).await;
+        assert_eq!(windows.clipboard().await, None);
+    }
+
+    #[tokio::test]
+    async fn text_copied_on_the_remote_comes_back_by_screen_edge() {
+        let (windows, mac) = pair(None, Some("stale mac text")).await;
+        switch(&windows, &mac, false).await;
+        mac.copy("copied on the mac").await;
+        switch(&mac, &windows, false).await;
+        assert_eq!(
+            windows.clipboard().await.as_deref(),
+            Some("copied on the mac")
+        );
+        // going back does not send the same text again: a newer copy made
+        // on the Mac in the meantime survives
+        mac.copy("newer on the mac").await;
+        switch(&windows, &mac, false).await;
+        assert_eq!(mac.clipboard().await.as_deref(), Some("newer on the mac"));
+    }
+
+    #[tokio::test]
+    async fn text_copied_on_the_remote_comes_back_by_release_bind() {
+        let (windows, mac) = pair(None, Some("stale mac text")).await;
+        switch(&windows, &mac, false).await;
+        mac.copy("copied on the mac").await;
+        switch(&windows, &mac, true).await;
+        assert_eq!(
+            windows.clipboard().await.as_deref(),
+            Some("copied on the mac")
+        );
+    }
+
+    #[tokio::test]
+    async fn text_copied_before_startup_is_not_sent() {
+        let (windows, mac) = pair(Some("copied before startup"), Some("mac text")).await;
+        switch(&windows, &mac, false).await;
+        assert_eq!(mac.clipboard().await.as_deref(), Some("mac text"));
     }
 
     #[tokio::test]
     async fn unsupported_source_does_not_clear_destination() {
         for text in [None, Some("")] {
-            let epoch = Arc::new(AtomicU64::new(0));
-            let controller = ClipboardWorker::memory(text, epoch.clone());
-            let remote = ClipboardWorker::memory(Some("keep this"), epoch.clone());
-            let (acceptor, connector, keys) = connections();
-            let (client, server) = tokio::io::duplex(4096);
-            let (received, sent) = tokio::join!(
-                receive(
-                    server,
-                    acceptor,
-                    keys,
-                    remote.clone(),
-                    epoch.clone(),
-                    Default::default(),
-                    0
-                ),
-                exchange(
-                    async { Ok(client) },
-                    connector,
-                    controller,
-                    epoch,
-                    0,
-                    [1; 16],
-                    1,
-                    false
-                ),
-            );
-            received.unwrap();
-            sent.unwrap();
-            assert_eq!(
-                remote.read().await.unwrap().text.as_deref(),
-                Some("keep this")
-            );
+            let (mut windows, mac) = pair(text, Some("keep this")).await;
+            windows.forget_startup();
+            switch(&windows, &mac, false).await;
+            assert_eq!(mac.clipboard().await.as_deref(), Some("keep this"));
         }
     }
 
     #[tokio::test]
     async fn copy_during_return_transfer_wins_over_remote_text() {
-        let epoch = Arc::new(AtomicU64::new(0));
-        let controller = ClipboardWorker::memory(Some("original"), epoch.clone());
-        let remote = ClipboardWorker::memory(Some("remote text"), epoch.clone());
-        let (acceptor, connector, keys) = connections();
+        let (windows, mut mac) = pair(Some("original"), Some("remote text")).await;
+        mac.forget_startup();
+        let (connector, acceptor) = link(&windows, &mac);
         let (client, server) = tokio::io::duplex(4096);
         let connecting = async {
-            let revision = controller.revision().await?;
-            controller
-                .write("new local copy".into(), revision, 0)
-                .await?;
+            windows.copy("new local copy").await;
             Ok(client)
         };
-        let (received, sent) = tokio::join!(
-            receive(
-                server,
-                acceptor,
-                keys,
-                remote,
-                epoch.clone(),
-                Default::default(),
-                0
-            ),
+        let (sent, received) = tokio::join!(
             exchange(
                 connecting,
                 connector,
-                controller.clone(),
-                epoch.clone(),
+                windows.worker.clone(),
+                windows.epoch.clone(),
                 0,
-                [1; 16],
+                windows.session,
                 1,
-                true
+                true,
+                (&windows.synced, &mac.fingerprint),
+            ),
+            receive(
+                server,
+                acceptor,
+                mac.keys.clone(),
+                mac.worker.clone(),
+                mac.epoch.clone(),
+                mac.orders.clone(),
+                mac.synced.clone(),
+                0
             ),
         );
         received.unwrap();
         sent.unwrap();
-        assert_eq!(
-            controller.read().await.unwrap().text.as_deref(),
-            Some("new local copy")
-        );
-    }
-    /// Push on entry, then pull on return, over one listener's state.
-    async fn enter_and_return(
-        controller: &ClipboardWorker,
-        remote: &ClipboardWorker,
-        copy_on_remote: Option<&str>,
-    ) {
-        let epoch = Arc::new(AtomicU64::new(0));
-        let (acceptor, connector, keys) = connections();
-        let orders: Orders = Default::default();
-        for returning in [false, true] {
-            if returning {
-                if let Some(text) = copy_on_remote {
-                    let revision = remote.revision().await.unwrap();
-                    remote.write(text.into(), revision, 0).await.unwrap();
-                }
-            }
-            let (client, server) = tokio::io::duplex(4096);
-            let (received, sent) = tokio::join!(
-                receive(
-                    server,
-                    acceptor.clone(),
-                    keys.clone(),
-                    remote.clone(),
-                    epoch.clone(),
-                    orders.clone(),
-                    0
-                ),
-                exchange(
-                    async { Ok(client) },
-                    connector.clone(),
-                    controller.clone(),
-                    epoch.clone(),
-                    0,
-                    [1; 16],
-                    if returning { 2 } else { 1 },
-                    returning
-                ),
-            );
-            received.unwrap();
-            sent.unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn return_without_a_remote_copy_keeps_the_controller_clipboard() {
-        // e.g. a screenshot: no text to send on entry
-        let epoch = Arc::new(AtomicU64::new(0));
-        let controller = ClipboardWorker::memory(None, epoch.clone());
-        let remote = ClipboardWorker::memory(Some("stale remote text"), epoch);
-        enter_and_return(&controller, &remote, None).await;
-        assert_eq!(controller.read().await.unwrap().text, None);
-    }
-
-    #[tokio::test]
-    async fn return_brings_back_text_copied_on_the_remote() {
-        let epoch = Arc::new(AtomicU64::new(0));
-        let controller = ClipboardWorker::memory(None, epoch.clone());
-        let remote = ClipboardWorker::memory(Some("stale remote text"), epoch);
-        enter_and_return(&controller, &remote, Some("copied on the remote")).await;
-        assert_eq!(
-            controller.read().await.unwrap().text.as_deref(),
-            Some("copied on the remote")
-        );
+        assert_eq!(windows.clipboard().await.as_deref(), Some("new local copy"));
     }
 
     #[test]
@@ -605,6 +671,7 @@ mod tests {
         assert!(order.accept([2; 16], 1));
         assert!(!order.accept([1; 16], 5));
     }
+
     #[test]
     fn only_supported_modes_are_accepted() {
         assert_eq!(
@@ -629,13 +696,7 @@ mod tests {
     #[test]
     fn separate_peer_pins_are_rejected() {
         // destinations are authenticated by the client's pinned certificate
-        assert!(
-            toml::from_str::<Settings>(
-                "[peers]
-host = 'aa'"
-            )
-            .is_err()
-        );
+        assert!(toml::from_str::<Settings>("[peers]\nhost = 'aa'").is_err());
     }
 
     #[test]
