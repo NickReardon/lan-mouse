@@ -18,6 +18,7 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::core::{PCWSTR, w};
 
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -138,6 +139,8 @@ thread_local! {
     static ENTRY_POINT: Cell<(i32, i32)> = const { Cell::new((0, 0)) };
     /// previous mouse position
     static PREV_POS: Cell<Option<(i32, i32)>> = const { Cell::new(None) };
+    /// virtual-key codes of keys that went down while Windows had control
+    static LOCAL_KEYS: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
     /// displays and generation counter
     static DISPLAYS: RefCell<(Vec<RECT>, i32)> = const { RefCell::new((Vec::new(), 0)) };
 }
@@ -322,6 +325,11 @@ fn check_client_activation(wparam: WPARAM, lparam: LPARAM) -> bool {
 
     /* update active client and entry point */
     ACTIVE_CLIENT.replace(Some(pos));
+    // a key-up the hook never saw (e.g. on the lock screen) would make that
+    // key's presses look like auto-repeats for the whole session
+    LOCAL_KEYS.with_borrow_mut(|keys| {
+        keys.retain(|&vk| unsafe { GetAsyncKeyState(vk as i32) } < 0);
+    });
     let entry_point = DISPLAYS.with_borrow(|(displays, _)| {
         display_util::clamp_to_display_bounds(displays, prev_pos, curr_pos)
     });
@@ -381,7 +389,59 @@ unsafe extern "system" fn mouse_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM)
     LRESULT(1)
 }
 
+/// What the keyboard hook does with a key event.
+#[derive(Debug, PartialEq, Eq)]
+enum KeyAction {
+    /// let Windows handle it
+    Pass,
+    /// send it to the active client
+    Forward,
+    /// drop it
+    Drop,
+}
+
+/// A key that went down while Windows had control must also go up on
+/// Windows, even when it is released while a client is active. Otherwise
+/// Windows keeps it pressed after control returns (NickReardon/lan-mouse#54).
+/// The client never saw that key go down, so it gets neither the release nor
+/// the auto-repeats of the still-held key.
+fn key_action(local_keys: &mut HashSet<u32>, active: bool, vk: u32, down: bool) -> KeyAction {
+    if !active {
+        if down {
+            local_keys.insert(vk);
+        } else {
+            local_keys.remove(&vk);
+        }
+        return KeyAction::Pass;
+    }
+    if !local_keys.contains(&vk) {
+        return KeyAction::Forward;
+    }
+    if down {
+        // auto-repeat: a new press always follows a release
+        KeyAction::Drop
+    } else {
+        local_keys.remove(&vk);
+        KeyAction::Pass
+    }
+}
+
 unsafe extern "system" fn kybrd_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let down = match wparam.0 {
+        p if p == WM_KEYDOWN as usize || p == WM_SYSKEYDOWN as usize => Some(true),
+        p if p == WM_KEYUP as usize || p == WM_SYSKEYUP as usize => Some(false),
+        _ => None,
+    };
+    if let Some(down) = down {
+        let vk = unsafe { (*(lparam.0 as *const KBDLLHOOKSTRUCT)).vkCode };
+        let active = ACTIVE_CLIENT.get().is_some();
+        match LOCAL_KEYS.with_borrow_mut(|keys| key_action(keys, active, vk, down)) {
+            KeyAction::Pass => return CallNextHookEx(None, ncode, wparam, lparam),
+            KeyAction::Drop => return LRESULT(1),
+            KeyAction::Forward => {}
+        }
+    }
+
     /* get active client if any */
     let Some(client) = ACTIVE_CLIENT.get() else {
         return CallNextHookEx(None, ncode, wparam, lparam);
@@ -661,5 +721,46 @@ fn to_mouse_event(wparam: WPARAM, lparam: LPARAM) -> Option<PointerEvent> {
             log::warn!("unknown mouse event: {w:?}");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LWIN: u32 = 0x5B;
+    const KEY_A: u32 = 0x41;
+
+    #[test]
+    fn key_held_across_the_edge_is_released_on_windows() {
+        let mut keys = HashSet::new();
+        // Win goes down on Windows, then control moves to a client
+        assert_eq!(key_action(&mut keys, false, LWIN, true), KeyAction::Pass);
+        // auto-repeats while held are not sent to the client
+        assert_eq!(key_action(&mut keys, true, LWIN, true), KeyAction::Drop);
+        // the release goes to Windows, not to the client
+        assert_eq!(key_action(&mut keys, true, LWIN, false), KeyAction::Pass);
+        // a new press belongs to the client
+        assert_eq!(key_action(&mut keys, true, LWIN, true), KeyAction::Forward);
+        assert_eq!(key_action(&mut keys, true, LWIN, false), KeyAction::Forward);
+    }
+
+    #[test]
+    fn keys_pressed_during_capture_go_to_the_client() {
+        let mut keys = HashSet::new();
+        assert_eq!(key_action(&mut keys, true, KEY_A, true), KeyAction::Forward);
+        assert_eq!(
+            key_action(&mut keys, true, KEY_A, false),
+            KeyAction::Forward
+        );
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn keys_released_on_windows_are_forgotten() {
+        let mut keys = HashSet::new();
+        assert_eq!(key_action(&mut keys, false, KEY_A, true), KeyAction::Pass);
+        assert_eq!(key_action(&mut keys, false, KEY_A, false), KeyAction::Pass);
+        assert_eq!(key_action(&mut keys, true, KEY_A, true), KeyAction::Forward);
     }
 }
