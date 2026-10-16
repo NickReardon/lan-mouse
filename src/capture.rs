@@ -332,12 +332,14 @@ impl CaptureTask {
                         }
                         // client disconnected
                         ProtoEvent::Leave(_, fraction) => {
-                            let position = self.get_pos(handle);
+                            // The peer's connection outlives a deleted or deactivated
+                            // client, so only the active client is known to have a capture.
                             let was_active = self.active_client == Some(handle);
                             log::info!("releasing capture: left remote client device region");
                             self.release_capture(capture).await?;
                             if was_active {
                                 if let Some(fraction) = fraction {
+                                    let position = self.get_pos(handle);
                                     self.place_entry(capture, position, fraction).await?;
                                 }
                             }
