@@ -198,3 +198,35 @@ from both computers for an outward crossing and its return. Include the directio
 monitor layout/scaling, and whether the cursor drifts after entry. The reported
 downward drift remains under investigation; these diagnostics do not change
 positioning behavior.
+
+## Cross-machine link test
+
+`tests/link.rs` checks the network path between two machines (for example
+Windows and macOS) without touching real input. Each machine runs one daemon
+with the `dummy` capture and emulation backends, so stop the regular Lan Mouse
+on both machines first. Both machines should build the same commit.
+
+The receiver approves every fingerprint that tries to connect while the test
+runs. This is only safe because it uses the dummy emulation backend.
+
+Start the receiver first:
+
+```sh
+LAN_MOUSE_LINK_ROLE=receive cargo test --test link -- --ignored --nocapture
+```
+
+Then start the sender, pointing it at the receiver's IP address or hostname:
+
+```sh
+LAN_MOUSE_LINK_ROLE=send LAN_MOUSE_LINK_PEER=192.168.1.20 cargo test --test link -- --ignored --nocapture
+```
+
+In PowerShell, set the variables first, e.g. `$env:LAN_MOUSE_LINK_ROLE = "send"`.
+
+The receiver passes after 500 input events arrive. The sender passes once the
+receiver acknowledges `Enter`, then keeps sending for five seconds. Optional
+variables: `LAN_MOUSE_LINK_PORT` (default 4242, used by both sides) and
+`LAN_MOUSE_LINK_TIMEOUT_SECS` (default 120). The receiver's firewall must allow
+inbound UDP on that port for the test binary (`target/debug/lan-mouse`).
+
+Tracked in [fork issue #44](https://github.com/NickReardon/lan-mouse/issues/44).

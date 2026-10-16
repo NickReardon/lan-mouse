@@ -10,8 +10,20 @@ use tokio::time::{self, Instant, Interval};
 
 use super::{Capture, CaptureError, CaptureEvent, Position};
 
+/// The simulated cursor always leaves the screen through this edge.
+const EDGE: Position = Position::Left;
+
+/// Pause after a release before the simulated cursor enters again,
+/// so an unreachable peer is retried without flooding the log.
+const REENTRY_DELAY: Duration = Duration::from_millis(500);
+
 pub struct DummyInputCapture {
+    /// whether a capture exists at [`EDGE`]
+    edge_created: bool,
+    /// start of the current capture session, `None` until `Begin` is sent
     start: Option<Instant>,
+    /// earliest time the next capture session may begin
+    resume_at: Instant,
     interval: Interval,
     offset: (i32, i32),
 }
@@ -19,7 +31,9 @@ pub struct DummyInputCapture {
 impl DummyInputCapture {
     pub fn new() -> Self {
         Self {
+            edge_created: false,
             start: None,
+            resume_at: Instant::now(),
             interval: time::interval(Duration::from_millis(1)),
             offset: (0, 0),
         }
@@ -34,11 +48,18 @@ impl Default for DummyInputCapture {
 
 #[async_trait]
 impl Capture for DummyInputCapture {
-    async fn create(&mut self, _pos: Position) -> Result<(), CaptureError> {
+    async fn create(&mut self, pos: Position) -> Result<(), CaptureError> {
+        if pos == EDGE {
+            self.edge_created = true;
+        }
         Ok(())
     }
 
-    async fn destroy(&mut self, _pos: Position) -> Result<(), CaptureError> {
+    async fn destroy(&mut self, pos: Position) -> Result<(), CaptureError> {
+        if pos == EDGE {
+            self.edge_created = false;
+            self.start = None;
+        }
         Ok(())
     }
 
@@ -47,6 +68,11 @@ impl Capture for DummyInputCapture {
     }
 
     async fn release(&mut self) -> Result<(), CaptureError> {
+        // Like a real cursor crossing the edge again, the next session
+        // starts with a new `Begin`, which the service needs to activate a
+        // client after a release (e.g. a failed send before connecting).
+        self.start = None;
+        self.resume_at = Instant::now() + REENTRY_DELAY;
         Ok(())
     }
 
@@ -62,10 +88,18 @@ impl Stream for DummyInputCapture {
     type Item = Result<(Position, CaptureEvent), CaptureError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let current = ready!(self.interval.poll_tick(cx));
+        // Only emit while a capture exists at the edge: events without a
+        // capture are dropped, which could lose `Begin`.
+        let current = loop {
+            let current = ready!(self.interval.poll_tick(cx));
+            if self.edge_created && current >= self.resume_at {
+                break current;
+            }
+        };
         let event = match self.start {
             None => {
                 self.start.replace(current);
+                self.offset = (0, 0);
                 CaptureEvent::Begin
             }
             Some(start) => {
@@ -85,6 +119,6 @@ impl Stream for DummyInputCapture {
                 }))
             }
         };
-        Poll::Ready(Some(Ok((Position::Left, event))))
+        Poll::Ready(Some(Ok((EDGE, event))))
     }
 }
