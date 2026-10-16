@@ -87,8 +87,9 @@ Choose `lan-mouse-windows-x86_64.zip` for Windows,
 `lan-mouse-macos-arm64.zip` for Apple silicon, or
 `lan-mouse-macos-intel.zip` for Intel Macs.
 
-On Windows, extract the entire ZIP and run `lan-mouse.exe` from the extracted
-folder so it can find the included DLLs. On macOS, extract `Lan Mouse.app` and
+On Windows, extract the entire ZIP, keeping its `share` subfolder, and run
+`lan-mouse.exe` from the extracted folder so it can find the included DLLs and
+GTK settings schemas. On macOS, extract `Lan Mouse.app` and
 follow the macOS launch and Accessibility permission instructions below.
 
 Version tags matching `v*` (for example, `v0.11.1`) run the GitHub build
