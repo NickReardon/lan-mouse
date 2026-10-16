@@ -575,7 +575,8 @@ A client without a pinned certificate yet is skipped and logged.
 
 To turn clipboard sharing off for **one client**, switch off **share clipboard**
 in that client's settings, or add `clipboard = false` to its `[[clients]]`
-entry. To turn it off **everywhere**, add this as a top-level table in
+entry. This stops sharing with that computer in both directions: nothing is sent
+to it, and text it sends or asks for is refused. To turn it off **everywhere**, add this as a top-level table in
 `config.toml`, outside any `[[clients]]` entry. Changes reload with the
 configuration file.
 

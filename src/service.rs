@@ -1,7 +1,7 @@
 use crate::{
     capture::{Capture, CaptureType, ICaptureEvent},
     client::ClientManager,
-    clipboard::{Clipboard, Mode as ClipboardMode},
+    clipboard::{self, Clipboard, Mode as ClipboardMode},
     config::{Config, ConfigClient},
     connect::{LanMouseConnection, PeerIdentityEvent},
     crypto,
@@ -41,6 +41,8 @@ pub enum ServiceError {
 pub struct Service {
     clipboard: Option<Clipboard>,
     clipboard_client: Option<ClientHandle>,
+    /// pins of clients with clipboard sharing turned off
+    clipboard_blocked: clipboard::Blocked,
     /// configuration
     config: Config,
     /// input capture
@@ -105,11 +107,17 @@ impl Service {
         let frontend_listener = AsyncFrontendListener::new().await?;
 
         let authorized_keys = Arc::new(RwLock::new(config.authorized_fingerprints()));
+        let clipboard_blocked = clipboard::Blocked::default();
+        clipboard_blocked
+            .write()
+            .expect("lock")
+            .clone_from(&blocked_pins(client_manager.clients()));
         let clipboard = match Clipboard::new(
             config.clipboard(),
             config.port(),
             cert.clone(),
             authorized_keys.clone(),
+            clipboard_blocked.clone(),
         )
         .await
         {
@@ -138,6 +146,7 @@ impl Service {
         let service = Self {
             clipboard,
             clipboard_client: None,
+            clipboard_blocked,
             config,
             capture,
             emulation,
@@ -306,6 +315,8 @@ impl Service {
             })
             .collect();
         self.config.set_clients(clients);
+        // every change to a client's pin or clipboard flag is saved here
+        self.sync_clipboard_blocked();
         let authorized_keys = self.authorized_keys.read().expect("lock").clone();
         self.config.set_authorized_keys(authorized_keys);
         if let Err(e) = self.config.write_back() {
@@ -327,6 +338,7 @@ impl Service {
             }
             self.notify_frontend(FrontendEvent::Created(handle, c, s));
         }
+        self.sync_clipboard_blocked();
         let release_bind = self.config.release_bind();
         self.capture.set_release_bind(release_bind);
         let authorized_keys = self.config.authorized_fingerprints();
@@ -482,6 +494,14 @@ impl Service {
         }
     }
 
+    fn sync_clipboard_blocked(&self) {
+        let pins = blocked_pins(self.client_manager.clients());
+        self.clipboard_blocked
+            .write()
+            .expect("lock")
+            .clone_from(&pins);
+    }
+
     async fn restart_clipboard(&mut self) {
         self.clipboard_client = None;
         if let Some(clipboard) = self.clipboard.take() {
@@ -496,6 +516,7 @@ impl Service {
                 self.port,
                 cert,
                 self.authorized_keys.clone(),
+                self.clipboard_blocked.clone(),
             )
             .await
             {
@@ -860,4 +881,17 @@ impl std::fmt::Display for HookKind {
             HookKind::Leave => f.write_str("leave"),
         }
     }
+}
+
+/// Pins of clients with clipboard sharing turned off: their requests are
+/// refused in both directions. An unpinned client cannot be recognized and
+/// is not listed.
+fn blocked_pins(
+    clients: Vec<(lan_mouse_ipc::ClientConfig, lan_mouse_ipc::ClientState)>,
+) -> HashSet<String> {
+    clients
+        .into_iter()
+        .filter(|(c, _)| !c.clipboard)
+        .filter_map(|(c, _)| c.fingerprint)
+        .collect()
 }

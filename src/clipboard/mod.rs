@@ -13,7 +13,7 @@ use protocol::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     io,
     sync::{
@@ -88,6 +88,11 @@ fn destination(config: &ClientConfig) -> Result<&str, Skip> {
     config.fingerprint.as_deref().ok_or(Skip::Unpinned)
 }
 
+/// Certificate fingerprints of peers whose client has clipboard sharing
+/// turned off. Their requests are refused in both directions, kept current
+/// by the service.
+pub(crate) type Blocked = Arc<std::sync::RwLock<HashSet<String>>>;
+
 pub(crate) struct Clipboard {
     cert: Certificate,
     epoch: Arc<AtomicU64>,
@@ -106,6 +111,7 @@ impl Clipboard {
         port: u16,
         cert: Certificate,
         authorized: tls::Authorized,
+        blocked: Blocked,
     ) -> io::Result<Option<Self>> {
         if settings.mode == Mode::Off {
             return Ok(None);
@@ -143,6 +149,7 @@ impl Clipboard {
             worker.clone(),
             epoch.clone(),
             synced.clone(),
+            blocked,
             max_text,
         ));
         log::info!("on-switch clipboard sharing listening on TCP port {port}");
@@ -302,6 +309,7 @@ impl Synced {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve(
     socket: TcpListener,
     acceptor: TlsAcceptor,
@@ -309,6 +317,7 @@ async fn serve(
     worker: ClipboardWorker,
     epoch: Arc<AtomicU64>,
     synced: Synced,
+    blocked: Blocked,
     max_text: usize,
 ) {
     let permits = Arc::new(Semaphore::new(8));
@@ -319,11 +328,11 @@ async fn serve(
             connection = socket.accept() => {
                 let (stream, addr) = match connection { Ok(connection) => connection, Err(error) => { log::warn!("clipboard listener failed: {error}"); break; } };
                 let Ok(permit) = permits.clone().try_acquire_owned() else { continue; };
-                let (acceptor, authorized, worker, epoch, orders, synced) = (acceptor.clone(), authorized.clone(), worker.clone(), epoch.clone(), orders.clone(), synced.clone());
+                let (acceptor, authorized, worker, epoch, orders, synced, blocked) = (acceptor.clone(), authorized.clone(), worker.clone(), epoch.clone(), orders.clone(), synced.clone(), blocked.clone());
                 let expected = epoch.load(Ordering::SeqCst);
                 tasks.spawn_local(async move {
                     let _permit = permit;
-                    let result = timeout(TRANSFER_TIMEOUT, receive(stream, acceptor, authorized, worker, epoch, orders, synced, expected, max_text)).await;
+                    let result = timeout(TRANSFER_TIMEOUT, receive(stream, acceptor, authorized, worker, epoch, orders, synced, &blocked, expected, max_text)).await;
                     if let Ok(Err(error)) = result { log::debug!("clipboard request from {addr} rejected: {error}"); }
                 });
             },
@@ -341,6 +350,7 @@ async fn receive(
     epoch: Arc<AtomicU64>,
     orders: Orders,
     synced: Synced,
+    blocked: &Blocked,
     expected: u64,
     max_text: usize,
 ) -> io::Result<()> {
@@ -353,6 +363,9 @@ async fn receive(
         .ok_or_else(|| invalid("missing clipboard client certificate"))?
         .clone();
     let fingerprint = crate::crypto::generate_fingerprint(&cert);
+    if blocked.read().expect("lock").contains(&fingerprint) {
+        return Err(invalid("clipboard sharing with this peer is turned off"));
+    }
     let (operation, session, sequence) = read_header(&mut stream).await?;
     if epoch.load(Ordering::SeqCst) != expected {
         return Err(invalid("clipboard switch was superseded"));
@@ -484,6 +497,7 @@ mod tests {
         epoch: Arc<AtomicU64>,
         synced: Synced,
         orders: Orders,
+        blocked: Blocked,
         session: [u8; 16],
         sequence: Cell<u64>,
     }
@@ -503,6 +517,7 @@ mod tests {
                 epoch,
                 synced,
                 orders: Default::default(),
+                blocked: Default::default(),
                 session: [session; 16],
                 sequence: Cell::new(0),
             }
@@ -557,6 +572,11 @@ mod tests {
     /// pull from `to`). A skipped push never connects, so `to` then only sees
     /// a closed stream.
     async fn switch(from: &Machine, to: &Machine, returning: bool) {
+        try_switch(from, to, returning).await.unwrap();
+    }
+
+    /// [`switch`], returning the controlling side's result.
+    async fn try_switch(from: &Machine, to: &Machine, returning: bool) -> io::Result<()> {
         let (connector, acceptor) = link(from, to);
         let (client, server) = tokio::io::duplex(4096);
         let (sent, _received) = tokio::join!(
@@ -580,11 +600,12 @@ mod tests {
                 to.epoch.clone(),
                 to.orders.clone(),
                 to.synced.clone(),
+                &to.blocked,
                 0,
                 DEFAULT_MAX_TEXT
             ),
         );
-        sent.unwrap();
+        sent
     }
 
     #[tokio::test]
@@ -649,6 +670,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_peer_turned_off_here_cannot_push_or_pull() {
+        let (windows, mac) = pair(Some("windows text"), Some("mac text")).await;
+        // the Mac's client entry on Windows has sharing off
+        windows
+            .blocked
+            .write()
+            .unwrap()
+            .insert(mac.fingerprint.clone());
+        // the Mac takes control of Windows and pushes a fresh copy
+        mac.copy("pushed by the mac").await;
+        assert!(try_switch(&mac, &windows, false).await.is_err());
+        assert_eq!(windows.clipboard().await.as_deref(), Some("windows text"));
+        // the Mac returns with its release bind and pulls a fresh copy
+        windows.copy("copied on windows").await;
+        assert!(try_switch(&mac, &windows, true).await.is_err());
+        assert_eq!(mac.clipboard().await.as_deref(), Some("pushed by the mac"));
+    }
+
+    #[tokio::test]
     async fn text_copied_before_startup_is_not_sent() {
         let (windows, mac) = pair(Some("copied before startup"), Some("mac text")).await;
         switch(&windows, &mac, false).await;
@@ -696,6 +736,7 @@ mod tests {
                 mac.epoch.clone(),
                 mac.orders.clone(),
                 mac.synced.clone(),
+                &mac.blocked,
                 0,
                 DEFAULT_MAX_TEXT
             ),
