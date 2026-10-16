@@ -24,6 +24,8 @@ pub(crate) struct Capture {
 }
 
 pub(crate) enum ICaptureEvent {
+    /// The peer acknowledged entry; its network address is now available.
+    ClientReady(u64),
     /// a client was entered
     CaptureBegin(CaptureHandle, Option<u16>),
     /// capture disabled
@@ -329,6 +331,7 @@ impl CaptureTask {
                         ProtoEvent::Ack(_) if self.active_client == Some(handle) && self.state == State::WaitingForAck => {
                             log::info!("client {handle} acknowledged the connection!");
                             self.state = State::Sending;
+                            self.event_tx.send(ICaptureEvent::ClientReady(handle)).expect("channel closed");
                         }
                         // client disconnected
                         ProtoEvent::Leave(_, fraction) => {

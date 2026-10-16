@@ -28,6 +28,7 @@ impl ClientObject {
             .property("resolving", state.resolving)
             .property("peer-commit", peer_commit_to_string(state.peer_commit))
             .property("fingerprint", client.fingerprint)
+            .property("clipboard", client.clipboard)
             .build()
     }
 
@@ -55,4 +56,5 @@ pub struct ClientData {
     pub ips: Vec<String>,
     pub peer_commit: Option<String>,
     pub fingerprint: Option<String>,
+    pub clipboard: bool,
 }

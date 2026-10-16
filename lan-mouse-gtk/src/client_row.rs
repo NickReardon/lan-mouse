@@ -139,6 +139,13 @@ impl ClientRow {
             .sync_create()
             .build();
 
+        // bind clipboard sharing to its switch; user changes go out as
+        // requests and come back through `set_clipboard`
+        let clipboard_binding = client_object
+            .bind_property("clipboard", &self.imp().clipboard_switch.get(), "active")
+            .sync_create()
+            .build();
+
         bindings.push(active_binding);
         bindings.push(switch_position_binding);
         bindings.push(hostname_binding);
@@ -150,6 +157,7 @@ impl ClientRow {
         bindings.push(ip_binding);
         bindings.push(fingerprint_binding);
         bindings.push(fingerprint_clear_binding);
+        bindings.push(clipboard_binding);
 
         // Render the initial collapsed subtitle from whatever
         // peer_commit the ClientObject was created with. Subsequent
@@ -182,6 +190,10 @@ impl ClientRow {
 
     pub fn set_fingerprint(&self, fingerprint: Option<String>) {
         self.imp().set_fingerprint(fingerprint);
+    }
+
+    pub fn set_clipboard(&self, clipboard: bool) {
+        self.imp().set_clipboard(clipboard);
     }
 
     pub fn set_dns_state(&self, resolved: bool) {

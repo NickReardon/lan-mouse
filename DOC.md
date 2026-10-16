@@ -73,6 +73,95 @@ sequenceDiagram
     Bob-->>-Alice: Ack (Keyboard Layout)
 ```
 
+## Clipboard protocol v1
+
+Windows and macOS synchronize text on control switches unless
+`[clipboard] mode = "off"`. The default, `"on-switch"`, starts a separate
+TLS-over-TCP listener on the input listener's port number. TLS 1.3 requires a
+client certificate from `authorized_fingerprints`. Outgoing requests require the
+destination to present the certificate pinned for that client (see "Peer
+authentication"); a client without a pin, or with `clipboard = false` (the GTK
+"share clipboard" switch), is skipped. The listener also refuses pushes and
+pulls from a peer whose certificate is the pin of a client with
+`clipboard = false`, so the switch applies in both directions. Changing or clearing a pin, or turning a
+client's sharing off, cancels a transfer already in flight. Handshake signatures are verified
+by rustls. ALPN is `lan-mouse-clipboard/1`. This channel does not depend on DTLS
+server-certificate verification and does not change the existing input protocol.
+
+After an input peer acknowledges entry, the controller sends a fresh clipboard
+snapshot. On release with the release bind, it requests the remote clipboard.
+Returning by the screen edge is the remote taking control, so it pushes instead.
+
+Each side records, per peer certificate, its native clipboard generation at the
+last switch with that peer:
+- after a push it sent, the generation it sent
+- after a push it received, the generation following its own write, if any
+- after answering a pull, the generation it answered with
+- after applying pulled text, the generation following that write
+
+A peer with no switch yet is compared with the generation at startup. A push is
+skipped, without connecting, and a pull is answered with the absent marker, when
+the generation is unchanged. So only text copied since the last switch (or since
+startup) is ever sent, and moving back and forth without copying never replaces
+the other side's clipboard, text or not. The wire format is unchanged. Neither operation
+intercepts paste shortcuts. GTK does not need to be open. A dedicated OS worker
+serializes clipboard access and performs bounded read retries on contention;
+network tasks remain independent of input capture and emulation.
+
+Each TCP connection carries one request. Integers use network byte order:
+
+| Field | Encoding |
+|---|---|
+| Protocol/version | Eight bytes: `LMCLIP01` |
+| Operation | One byte: 1 = push, 2 = pull |
+| Sender session | 16 random bytes, generated per clipboard service instance |
+| Sequence | Monotonically increasing u64 within the session |
+| Text (push body / pull response) | u32 byte length followed by UTF-8; `0xffffffff` means absent |
+| Push response | One byte: 1 = applied, 0 = skipped |
+
+Receivers reject unsupported versions/operations, malformed UTF-8, truncated
+frames, and lengths above their limit before allocating a payload buffer. The
+limit is `[clipboard] max_size_mib`, 1 MiB by default and at most 16 MiB so a
+transfer fits the five-second timeout. Senders skip text above their own limit,
+so peers should use the same value. Empty text
+is a valid frame; an OS clipboard without text uses the absent marker. Requests
+have a five-second timeout, at most eight inbound tasks, and a bounded worker
+queue. Request ordering tracks at most 128 peer identities and 64 retired
+sessions per identity. Lower/duplicate sequences and retired sessions are
+rejected; a newer request supersedes an older push still receiving its payload.
+
+A local switch epoch invalidates queued writes from cancelled work. Native
+clipboard generations (Windows sequence number / macOS pasteboard change count)
+prevent a received transfer from overwriting a local copy made while that
+transfer was being received. Check and write are adjacent OS operations, not an
+atomic compare-and-swap. Since transfers are asynchronous, immediate paste is
+not delayed until synchronization completes. Protocol changes must introduce a
+new version and ALPN identifier. Clipboard contents must not appear in logs.
+
+### Manual clipboard verification
+
+Run a Windows/macOS pair with clipboard sharing on (the default), with each
+side's client pinned and each controller authorized on the other side.
+Test both Windows-controlled-Mac and Mac-controlled-Windows configurations:
+
+1. Copy ASCII, multiline text, Unicode, and emoji; switch and paste through both
+   keyboard shortcuts and application menus.
+2. Copy new text on the controlled computer; return by screen edge and release
+   bind and verify the controller receives it.
+3. Repeat switches rapidly, copy locally during a transfer, disconnect, disable
+   sharing in the config, and reconnect. Verify obsolete work does not replace
+   newer clipboard changes and input remains responsive.
+4. Try images, files, an empty clipboard, and text above 1 MiB. Verify unsupported
+   content leaves the destination untouched and errors contain no clipboard text.
+5. Try an unauthorized controller, a regenerated destination certificate (the
+   pin no longer matches), and an older peer.
+   Clipboard transfer must fail without leaking contents or preventing ordinary
+   input sharing. Verify held modifiers release normally on disconnect.
+
+Automated tests use in-memory clipboards and real TLS handshakes, leaving the
+developer's system clipboard untouched. Native clipboard and cross-platform
+behavior still require the manual checks above.
+
 ## Problems
 The general Idea is to have a bidirectional connection by default, meaning
 any connected device can not only receive events but also send events back.

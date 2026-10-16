@@ -205,6 +205,22 @@ impl Window {
                         ),
                     );
                     row.connect_closure(
+                        "request-clipboard",
+                        false,
+                        closure_local!(
+                            #[strong]
+                            window,
+                            move |row: ClientRow, clipboard: bool| {
+                                if let Some(client) = window.client_by_idx(row.index() as u32) {
+                                    window.request(FrontendRequest::UpdateClipboard(
+                                        client.handle(),
+                                        clipboard,
+                                    ));
+                                }
+                            }
+                        ),
+                    );
+                    row.connect_closure(
                         "request-delete",
                         false,
                         closure_local!(
@@ -369,6 +385,7 @@ impl Window {
             }
         }
         row.set_fingerprint(client.fingerprint);
+        row.set_clipboard(client.clipboard);
     }
 
     pub(super) fn update_client_state(&self, handle: ClientHandle, state: ClientState) {

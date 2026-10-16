@@ -62,6 +62,7 @@ fn default_path() -> Result<PathBuf, VarError> {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 struct ConfigToml {
+    clipboard: Option<crate::clipboard::Settings>,
     capture_backend: Option<CaptureBackend>,
     emulation_backend: Option<EmulationBackend>,
     port: Option<u16>,
@@ -82,6 +83,8 @@ struct TomlClient {
     enter_hook: Option<String>,
     leave_hook: Option<String>,
     fingerprint: Option<String>,
+    /// written only when sharing is turned off for this client
+    clipboard: Option<bool>,
 }
 
 impl ConfigToml {
@@ -279,6 +282,7 @@ pub struct ConfigClient {
     pub enter_hook: Option<String>,
     pub leave_hook: Option<String>,
     pub fingerprint: Option<String>,
+    pub clipboard: bool,
 }
 
 /// Normalize a pinned fingerprint read from the config file. An invalid
@@ -305,6 +309,7 @@ impl From<TomlClient> for ConfigClient {
         let port = toml.port.unwrap_or(DEFAULT_PORT);
         let pos = toml.position.unwrap_or_default();
         let fingerprint = config_fingerprint(toml.fingerprint);
+        let clipboard = toml.clipboard.unwrap_or(true);
         Self {
             ips,
             hostname,
@@ -314,6 +319,7 @@ impl From<TomlClient> for ConfigClient {
             enter_hook,
             leave_hook,
             fingerprint,
+            clipboard,
         }
     }
 }
@@ -335,6 +341,7 @@ impl From<ConfigClient> for TomlClient {
         let enter_hook = client.enter_hook;
         let leave_hook = client.leave_hook;
         let fingerprint = client.fingerprint;
+        let clipboard = if client.clipboard { None } else { Some(false) };
         Self {
             hostname,
             host_name,
@@ -345,6 +352,7 @@ impl From<ConfigClient> for TomlClient {
             enter_hook,
             leave_hook,
             fingerprint,
+            clipboard,
         }
     }
 }
@@ -365,6 +373,13 @@ const DEFAULT_RELEASE_KEYS: [scancode::Linux; 4] =
     [KeyLeftCtrl, KeyLeftShift, KeyLeftMeta, KeyLeftAlt];
 
 impl Config {
+    pub(crate) fn clipboard(&self) -> crate::clipboard::Settings {
+        self.config_toml
+            .as_ref()
+            .and_then(|c| c.clipboard.clone())
+            .unwrap_or_default()
+    }
+
     pub fn new() -> Result<Self, ConfigError> {
         let args = Args::parse();
 
@@ -648,5 +663,34 @@ mod tests {
         let serialized = toml::to_string(&toml_client).expect("serialize client");
         let reparsed: TomlClient = toml::from_str(&serialized).expect("reparse client");
         assert_eq!(reparsed.fingerprint.as_deref(), Some(FINGERPRINT));
+    }
+
+    #[test]
+    fn client_clipboard_defaults_to_on() {
+        let client = parse_client(
+            "[[clients]]
+hostname = \"laptop\"
+",
+        );
+        assert!(client.clipboard);
+        // only an opt-out is written back
+        let toml_client: TomlClient = client.into();
+        assert_eq!(toml_client.clipboard, None);
+    }
+
+    #[test]
+    fn client_clipboard_opt_out_round_trips() {
+        let client = parse_client(
+            "[[clients]]
+clipboard = false
+",
+        );
+        assert!(!client.clipboard);
+        let toml_client: TomlClient = client.into();
+        let serialized = toml::to_string(&toml_client).expect("serialize client");
+        let reparsed: ConfigClient = toml::from_str::<TomlClient>(&serialized)
+            .expect("reparse client")
+            .into();
+        assert!(!reparsed.clipboard);
     }
 }

@@ -532,6 +532,8 @@ ips = ["192.168.178.156"]
 # device presenting a different certificate are refused. If omitted, the
 # certificate seen on the first connection is pinned and saved here.
 fingerprint = "bc:05:ab:7a:a4:de:88:8c:2f:92:ac:bc:b8:49:b8:24:0d:44:b3:e6:a4:ef:d7:0b:6c:69:6d:77:53:0b:14:80"
+# optional: turn clipboard sharing off for this client (default: on)
+# clipboard = false
 
 # define a client on the left side with IP address 192.168.178.189
 [[clients]]
@@ -546,6 +548,64 @@ port = 4242
 ```
 
 Where `left` can be either `left`, `right`, `top` or `bottom`.
+
+### Clipboard sharing (Windows and macOS)
+
+Plain text can be shared when control switches between computers. Copy text,
+move control to the other computer, and paste using its normal shortcut or menu.
+When returning control (by the screen edge or with the release bind), text
+copied on the other computer during that visit comes back.
+
+Only text copied **since the last switch** is sent, counting Lan Mouse's start as
+a switch. Moving back and forth without copying never replaces the other
+computer's clipboard. A screenshot or other non-text clipboard is kept, and so
+is text copied before Lan Mouse started. Transfers run in the background; a paste made immediately
+after switching can still see the previous clipboard until the transfer finishes.
+
+Clipboard sharing is **on by default** whenever both computers run a version
+that supports it. It only works with peers this computer already trusts:
+
+- **Sending to a client:** the client's certificate must be pinned. Lan Mouse
+  pins it on the first connection (see [Encryption](#encryption)), so no extra
+  setup is needed.
+- **Receiving from a device:** the device must be authorized, through the
+  Authorize dialog or `[authorized_fingerprints]`.
+
+A client without a pinned certificate yet is skipped and logged.
+
+To turn clipboard sharing off for **one client**, switch off **share clipboard**
+in that client's settings, or add `clipboard = false` to its `[[clients]]`
+entry. This stops sharing with that computer in both directions: nothing is sent
+to it, and text it sends or asks for is refused. To turn it off **everywhere**, add this as a top-level table in
+`config.toml`, outside any `[[clients]]` entry. Changes reload with the
+configuration file.
+
+```toml
+[clipboard]
+mode = "off" # default: "on-switch"
+# max_size_mib = 4 # default: 1, at most 16
+```
+
+Clipboard transfers use a separate, mutually authenticated TLS 1.3 connection on
+the same **TCP port number** as the UDP input listener (4242 by default). Allow
+that TCP port through the destination's firewall. A destination presenting a
+certificate other than the pinned one is refused and reported in the daemon log.
+Older peers keep input sharing but cannot exchange clipboards.
+
+Only plain text is transferred, up to **1 MiB of UTF-8** by default. Raise the
+limit with `max_size_mib` (1 to 16) in the `[clipboard]` table, set to the same
+value on both computers: a receiver refuses text above its own limit, and
+larger text is skipped with a warning in the daemon log. Images, files, formatting,
+and empty/non-text clipboards do not clear the destination's existing clipboard.
+New local clipboard changes during a received transfer take precedence, and
+superseded switch tasks are cancelled. Transfers time out after five seconds;
+there is no automatic reconciliation on reconnect and no clipboard history.
+Continuous synchronization and a remote-paste hotkey are not implemented yet.
+Clipboard contents are never logged. While sharing is on, authorized peers can
+read and replace this computer's clipboard through the clipboard channel. They
+can already type into it, since they are authorized for input.
+
+Implementation is tracked in [fork issue #1](https://github.com/NickReardon/lan-mouse/issues/1).
 
 ## Roadmap
 - [x] Graphical frontend (gtk + libadwaita)
